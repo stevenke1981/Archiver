@@ -1,0 +1,20 @@
+[package]
+name = "archiver-core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bzip2 = "0.6.1"
+chrono = "0.4.45"
+flate2 = "1.1.10"
+liblzma = { version = "0.4.8", features = ["static"] }
+sevenz-rust2 = { version = "0.23.0", features = ["compress", "aes256"] }
+tar = "0.4.46"
+thiserror = "2.0.21"
+unrar = "0.5.8"
+walkdir = "2.5.0"
+zip = "9.0.1"
+zstd = "0.14.1"
+
+[dev-dependencies]
+tempfile = "3.27.0"
