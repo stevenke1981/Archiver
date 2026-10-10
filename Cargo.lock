@@ -156,7 +156,7 @@ dependencies = [
 
 [[package]]
 name = "archiver"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "archiver-core",
  "clap",
@@ -168,7 +168,7 @@ dependencies = [
 
 [[package]]
 name = "archiver-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bzip2",
  "chrono",

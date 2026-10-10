@@ -91,6 +91,12 @@ rarc x archive.rar -o 輸出資料夾     # 解壓（可在後面列出指定項
 rarc c out.tar.zst 資料夾 檔案 -l 19  # 建立（格式依副檔名決定）
 ```
 
+## 效能
+
+v0.4.0 起使用多執行緒：xz（liblzma MT）、zstd（zstdmt）、7z（固實 + 多執行緒 LZMA2 壓縮與解壓）、平行 ZIP（各檔案分組平行壓縮後直接合併）、平行 gzip（4 MiB 區塊、標準多成員 gzip）。
+以約 490 MB 混合資料、8 核心測試：7z 壓縮 292 秒 → 46 秒、tar.xz 285 → 41 秒、zip 10.5 → 2.4 秒、tar.gz 9.4 → 1.6 秒；詳見 [bench/README.md](bench/README.md)。
+多執行緒 7z / xz 壓縮時記憶體用量較高（約 1.2–1.4 GB）；可用環境變數 `ARCHIVER_THREADS=2` 限制執行緒數。
+
 ## 專案結構
 
 - `core/` — `archiver-core` 函式庫：格式偵測、列出、解壓、建立
@@ -121,6 +127,8 @@ Work runs on a background thread with a progress bar and cancel button; drag-and
 A small CLI (`rarc`) is included.
 
 *Formerly "Rust Archiver" (≤ v0.2.0); the GUI binary is now `archiver`. `--register-shell` also removes the old "Rust Archiver" menu entries so you don't get duplicates.*
+
+**Performance (v0.4.0):** multi-threaded xz, zstd, 7z (solid, MT LZMA2 encode/decode), parallel ZIP entry compression and parallel multi-member gzip, larger I/O buffers, fat LTO. On a ~490 MB mixed set with 8 cores: 7z create 292 s → 46 s, tar.xz 285 s → 41 s, zip 10.5 s → 2.4 s, tar.gz 9.4 s → 1.6 s (see `bench/`). Multi-threaded 7z/xz use ~1.2–1.4 GB RAM; set `ARCHIVER_THREADS` to limit.
 
 **Context-menu integration** (`archiver --register-shell`, `--unregister-shell`, or the "⚙ Shell menu" toggle in the GUI; current user only, no admin):
 Windows Explorer cascading "Archiver" submenu via HKCU registry (Open / Extract here / Extract to folder\ / Add to archive… for archives; Add to archive… for other files and folders);
