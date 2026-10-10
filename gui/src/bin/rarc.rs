@@ -5,7 +5,7 @@ use archiver_core::{CreateOptions, Format, Progress};
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "rarc", version, about = "Rust Archiver CLI: list / extract / create archives")]
+#[command(name = "rarc", version, about = "Archiver CLI: list / extract / create archives")]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,

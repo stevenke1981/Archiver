@@ -15,7 +15,7 @@ pub enum Action {
     Help,
 }
 
-pub const USAGE: &str = "Usage: rust-archiver [OPTION] [FILES...]
+pub const USAGE: &str = "Usage: archiver [OPTION] [FILES...]
   <archive>                       open archive in the GUI
   --open <archive>                open archive in the GUI
   --extract-here <archives...>    extract next to each archive

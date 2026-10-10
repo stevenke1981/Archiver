@@ -46,13 +46,13 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_drag_and_drop(true)
-            .with_title("Rust Archiver")
+            .with_title("Archiver")
             .with_inner_size([960.0, 640.0])
             .with_min_inner_size([640.0, 400.0]),
         ..Default::default()
     };
     eframe::run_native(
-        "rust-archiver",
+        "archiver",
         options,
         Box::new(move |cc| {
             install_fonts(&cc.egui_ctx);
@@ -67,7 +67,7 @@ fn main() -> eframe::Result {
 /// Add a system CJK font as fallback so Chinese/Japanese file names render.
 fn install_fonts(ctx: &egui::Context) {
     let mut c: Vec<PathBuf> = Vec::new();
-    if let Some(p) = std::env::var_os("RUST_ARCHIVER_FONT") {
+    if let Some(p) = std::env::var_os("ARCHIVER_FONT") {
         c.push(p.into());
     }
     if cfg!(windows) {

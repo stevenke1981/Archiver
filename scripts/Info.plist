@@ -3,13 +3,13 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleName</key>
-	<string>Rust Archiver</string>
+	<string>Archiver</string>
 	<key>CFBundleDisplayName</key>
-	<string>Rust Archiver</string>
+	<string>Archiver</string>
 	<key>CFBundleIdentifier</key>
-	<string>io.github.stevenke1981.rust-archiver</string>
+	<string>io.github.stevenke1981.archiver</string>
 	<key>CFBundleExecutable</key>
-	<string>rust-archiver</string>
+	<string>archiver</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleVersion</key>

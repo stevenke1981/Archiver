@@ -1,6 +1,6 @@
 [package]
-name = "rust-archiver"
-version = "0.2.0"
+name = "archiver"
+version = "0.3.0"
 edition = "2024"
 
 [dependencies]
@@ -16,7 +16,7 @@ winreg = "0.55"
 tempfile = "3"
 
 [[bin]]
-name = "rust-archiver"
+name = "archiver"
 path = "src/main.rs"
 
 [[bin]]

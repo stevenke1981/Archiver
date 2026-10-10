@@ -36,19 +36,33 @@ jobs:
         env:
           MSYS2_ARG_CONV_EXCL: "*"
         run: |
-          B=target/release/rust-archiver
-          [ "$RUNNER_OS" = "Windows" ] && B=target/release/rust-archiver.exe
+          B=target/release/archiver
+          [ "$RUNNER_OS" = "Windows" ] && B=target/release/archiver.exe
+          # simulate a v0.2.0 install, which --register-shell must clean up
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            reg add 'HKCU\Software\Classes\Directory\shell\RustArchiver' /v MUIVerb /d 'Rust Archiver' /f
+          else
+            mkdir -p ~/.local/share/applications ~/.local/share/nautilus/scripts/"Rust Archiver" ~/Library/Services/"Rust Archiver - Extract here.workflow"
+            touch ~/.local/share/applications/rust-archiver.desktop
+          fi
           $B --register-shell
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            ! reg query 'HKCU\Software\Classes\Directory\shell\RustArchiver' 2>/dev/null
+          else
+            test ! -e ~/.local/share/applications/rust-archiver.desktop
+            test ! -e ~/.local/share/nautilus/scripts/"Rust Archiver"
+            test ! -e ~/Library/Services/"Rust Archiver - Extract here.workflow"
+          fi
           case "$RUNNER_OS" in
-            Windows) reg query 'HKCU\Software\Classes\SystemFileAssociations\.zip\shell\RustArchiver\shell\02extracthere\command' /ve
-                     reg query 'HKCU\Software\Classes\Directory\shell\RustArchiver' ;;
+            Windows) reg query 'HKCU\Software\Classes\SystemFileAssociations\.zip\shell\Archiver\shell\02extracthere\command' /ve
+                     reg query 'HKCU\Software\Classes\Directory\shell\Archiver' ;;
             macOS)   ls -R ~/Library/Services | grep -i "rust archiver"
-                     plutil -lint ~/Library/Services/*Rust\ Archiver*.workflow/Contents/Info.plist ~/Library/Services/*Rust\ Archiver*.workflow/Contents/document.wflow ;;
-            Linux)   cat ~/.local/share/applications/rust-archiver.desktop
-                     ls -la ~/.local/share/nautilus/scripts/"Rust Archiver" ~/.local/share/nemo/actions ;;
+                     plutil -lint ~/Library/Services/Archiver\ -\ *.workflow/Contents/Info.plist ~/Library/Services/Archiver\ -\ *.workflow/Contents/document.wflow ;;
+            Linux)   cat ~/.local/share/applications/archiver.desktop
+                     ls -la ~/.local/share/nautilus/scripts/"Archiver" ~/.local/share/nemo/actions ;;
           esac
           $B --unregister-shell
-          if [ "$RUNNER_OS" = "Windows" ]; then ! reg query 'HKCU\Software\Classes\Directory\shell\RustArchiver' 2>/dev/null; fi
+          if [ "$RUNNER_OS" = "Windows" ]; then ! reg query 'HKCU\Software\Classes\Directory\shell\Archiver' 2>/dev/null; fi
       - name: Validate app Info.plist
         if: runner.os == 'macOS'
         run: plutil -lint scripts/Info.plist

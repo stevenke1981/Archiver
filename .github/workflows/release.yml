@@ -38,19 +38,19 @@ jobs:
       - name: Package
         shell: bash
         run: |
-          N=rust-archiver-${{ matrix.name }}
+          N=archiver-${{ matrix.name }}
           mkdir -p dist/$N
           cp README.md LICENSE dist/$N/
           if [ "$RUNNER_OS" = "Windows" ]; then
-            cp target/release/rust-archiver.exe target/release/rarc.exe dist/$N/
+            cp target/release/archiver.exe target/release/rarc.exe dist/$N/
             cd dist && 7z a $N.zip $N >/dev/null
           else
-            cp target/release/rust-archiver target/release/rarc dist/$N/
+            cp target/release/archiver target/release/rarc dist/$N/
             cd dist && tar czf $N.tar.gz $N
           fi
       - uses: actions/upload-artifact@v4
         with:
-          name: rust-archiver-${{ matrix.name }}
+          name: archiver-${{ matrix.name }}
           path: |
             dist/*.zip
             dist/*.tar.gz
@@ -77,7 +77,7 @@ jobs:
         run: ./scripts/macos-bundle.sh
       - uses: actions/upload-artifact@v4
         with:
-          name: rust-archiver-macos-universal
+          name: archiver-macos-universal
           path: |
             dist/*.zip
             dist/*.tar.gz

@@ -1,4 +1,4 @@
-# Rust Archiver
+# Archiver
 
 跨平台（Windows / Linux / macOS）的壓縮／解壓縮工具，類似 WinRAR。核心與 GUI 皆以 Rust 撰寫（GUI 使用 egui/eframe）。
 
@@ -21,28 +21,30 @@
 在 GUI 按「⚙ 右鍵選單 Shell menu」勾選啟用，或在終端機執行：
 
 ```bash
-rust-archiver --register-shell     # 安裝（僅目前使用者，不需系統管理員）
-rust-archiver --unregister-shell   # 移除
+archiver --register-shell     # 安裝（僅目前使用者，不需系統管理員）
+archiver --unregister-shell   # 移除
 ```
 
 > 註冊時會記錄程式目前的路徑，搬移程式後請重新註冊。
+>
+> 本專案原名 Rust Archiver（v0.2.0 以前）。執行 `archiver --register-shell` 會自動移除舊版「Rust Archiver」的右鍵選單項目，避免重複。
 
 | 系統 | 安裝內容 | 選單項目 |
 |---|---|---|
 | Windows | `HKCU\Software\Classes` 下的串接子選單：壓縮檔（`SystemFileAssociations\.zip` 等）、所有檔案（`*`）、資料夾（`Directory`） | 壓縮檔：開啟、解壓到這裡、解壓到資料夾\、加入壓縮檔…；其他檔案與資料夾：加入壓縮檔… |
-| Linux | `~/.local/share/applications/rust-archiver.desktop`（MIME 關聯 → 「以其他程式開啟」）、Nautilus 腳本（右鍵 → 腳本 → Rust Archiver）、Dolphin 服務選單（KF6 `kio/servicemenus` 與 KF5 `kservices5/ServiceMenus`）、Nemo actions | 同上 |
-| macOS | `~/Library/Services/Rust Archiver - *.workflow` 四個快速動作 | Finder 右鍵 → 快速動作（或「服務」）→ Rust Archiver - … |
+| Linux | `~/.local/share/applications/archiver.desktop`（MIME 關聯 → 「以其他程式開啟」）、Nautilus 腳本（右鍵 → 腳本 → Archiver）、Dolphin 服務選單（KF6 `kio/servicemenus` 與 KF5 `kservices5/ServiceMenus`）、Nemo actions | 同上 |
+| macOS | `~/Library/Services/Archiver - *.workflow` 四個快速動作 | Finder 右鍵 → 快速動作（或「服務」）→ Archiver - … |
 
-macOS：若快速動作沒有出現，到「系統設定 → 一般 → 登入項目與延伸功能 → Finder（或 鍵盤 → 鍵盤快速鍵 → 服務）」勾選。建議先把 `Rust Archiver.app` 放到「應用程式」資料夾再註冊。
+macOS：若快速動作沒有出現，到「系統設定 → 一般 → 登入項目與延伸功能 → Finder（或 鍵盤 → 鍵盤快速鍵 → 服務）」勾選。建議先把 `Archiver.app` 放到「應用程式」資料夾再註冊。
 
 ### 命令列參數（供右鍵選單使用）
 
 ```
-rust-archiver <壓縮檔>                     開啟
-rust-archiver --open <壓縮檔>
-rust-archiver --extract-here <壓縮檔...>     解壓到壓縮檔所在資料夾，成功後自動關閉
-rust-archiver --extract-to-folder <壓縮檔...> 解壓到「壓縮檔名稱」子資料夾
-rust-archiver --compress <檔案/資料夾...>     開啟建立壓縮檔視窗並預先填入
+archiver <壓縮檔>                     開啟
+archiver --open <壓縮檔>
+archiver --extract-here <壓縮檔...>     解壓到壓縮檔所在資料夾，成功後自動關閉
+archiver --extract-to-folder <壓縮檔...> 解壓到「壓縮檔名稱」子資料夾
+archiver --compress <檔案/資料夾...>     開啟建立壓縮檔視窗並預先填入
 ```
 
 解壓失敗（例如需要密碼）時會改為開啟該壓縮檔，輸入密碼後再解壓。
@@ -65,11 +67,11 @@ rust-archiver --compress <檔案/資料夾...>     開啟建立壓縮檔視窗�
 
 ## 下載
 
-到 [Releases](https://github.com/stevenke1981/rust-archiver/releases) 下載對應平台的檔案：
+到 [Releases](https://github.com/stevenke1981/archiver/releases) 下載對應平台的檔案：
 
-- Windows：`rust-archiver-windows-x64.zip`
-- Linux：`rust-archiver-linux-x64.tar.gz`（需 GTK3 執行環境供檔案對話框使用）
-- macOS：`rust-archiver-macos-universal-app.zip`（`Rust Archiver.app`，Apple Silicon + Intel 通用版，宣告了壓縮檔文件類型，可用「打開檔案的應用程式」）；`rust-archiver-macos-universal.tar.gz` 為單純執行檔。未經公證，首次開啟請按右鍵 → 打開，或在「系統設定 → 隱私權與安全性」允許
+- Windows：`archiver-windows-x64.zip`
+- Linux：`archiver-linux-x64.tar.gz`（需 GTK3 執行環境供檔案對話框使用）
+- macOS：`archiver-macos-universal-app.zip`（`Archiver.app`，Apple Silicon + Intel 通用版，宣告了壓縮檔文件類型，可用「打開檔案的應用程式」）；`archiver-macos-universal.tar.gz` 為單純執行檔。未經公證，首次開啟請按右鍵 → 打開，或在「系統設定 → 隱私權與安全性」允許
 
 ## 從原始碼建置
 
@@ -78,7 +80,7 @@ rust-archiver --compress <檔案/資料夾...>     開啟建立壓縮檔視窗�
 sudo apt install build-essential pkg-config libgtk-3-dev libxkbcommon-dev libgl1-mesa-dev libwayland-dev
 cargo build --release
 cargo test
-./target/release/rust-archiver [壓縮檔]
+./target/release/archiver [壓縮檔]
 ```
 
 ## 命令列 `rarc`
@@ -92,7 +94,7 @@ rarc c out.tar.zst 資料夾 檔案 -l 19  # 建立（格式依副檔名決定�
 ## 專案結構
 
 - `core/` — `archiver-core` 函式庫：格式偵測、列出、解壓、建立
-- `gui/` — `rust-archiver` GUI 程式與 `rarc` CLI
+- `gui/` — `archiver` GUI 程式與 `rarc` CLI
 
 ## 已知限制
 
@@ -112,14 +114,16 @@ MIT
 
 ## English summary
 
-**Rust Archiver** is a WinRAR-like, cross-platform (Windows/Linux/macOS) archive manager with a Rust core library and an egui GUI.
+**Archiver** is a WinRAR-like, cross-platform (Windows/Linux/macOS) archive manager with a Rust core library and an egui GUI.
 It can open and list archives, extract all or selected entries, and create ZIP, 7z, TAR, TAR.GZ/BZ2/XZ/ZST and single-file GZ/BZ2/XZ/ZST archives with selectable compression level.
 ZIP and 7z support AES-256 passwords; RAR (v4/v5) is **extract-only** because the RAR compression format is proprietary and the UnRAR license forbids re-creating a RAR compressor.
 Work runs on a background thread with a progress bar and cancel button; drag-and-drop opens archives or adds files to a new archive.
 A small CLI (`rarc`) is included.
 
-**Context-menu integration** (`rust-archiver --register-shell`, `--unregister-shell`, or the "⚙ Shell menu" toggle in the GUI; current user only, no admin):
-Windows Explorer cascading "Rust Archiver" submenu via HKCU registry (Open / Extract here / Extract to folder\ / Add to archive… for archives; Add to archive… for other files and folders);
+*Formerly "Rust Archiver" (≤ v0.2.0); the GUI binary is now `archiver`. `--register-shell` also removes the old "Rust Archiver" menu entries so you don't get duplicates.*
+
+**Context-menu integration** (`archiver --register-shell`, `--unregister-shell`, or the "⚙ Shell menu" toggle in the GUI; current user only, no admin):
+Windows Explorer cascading "Archiver" submenu via HKCU registry (Open / Extract here / Extract to folder\ / Add to archive… for archives; Add to archive… for other files and folders);
 Linux `.desktop` MIME associations plus Nautilus scripts, Dolphin service menus and Nemo actions;
 macOS Finder Quick Actions in `~/Library/Services`. The app accepts `--open`, `--extract-here`, `--extract-to-folder` and `--compress` with multiple files.
-The macOS release ships a universal (arm64 + x86_64) `Rust Archiver.app` with archive document types declared. Limitations: Windows launches one process per selected file; macOS "Open With" launches the app but the file is not loaded (Apple Events are not exposed by eframe) — use the Quick Actions or drag-and-drop. Prebuilt binaries are on the Releases page. Licensed under MIT.
+The macOS release ships a universal (arm64 + x86_64) `Archiver.app` with archive document types declared. Limitations: Windows launches one process per selected file; macOS "Open With" launches the app but the file is not loaded (Apple Events are not exposed by eframe) — use the Quick Actions or drag-and-drop. Prebuilt binaries are on the Releases page. Licensed under MIT.
