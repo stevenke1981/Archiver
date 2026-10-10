@@ -1010,6 +1010,20 @@ mod tests {
     }
 
     #[test]
+    fn cancel_removes_partial_output() {
+        for fmt in [Format::Zip, Format::SevenZ, Format::TarGz, Format::TarXz, Format::TarZst] {
+            let t = tempfile::tempdir().unwrap();
+            let src = sample(t.path());
+            let out = t.path().join(format!("c.{}", fmt.extension()));
+            let p = Progress { on: &|_, _, _| {}, cancel: Arc::new(AtomicBool::new(true)) };
+            let r = create(&out, &[src], &CreateOptions { format: fmt, level: None, password: None }, &p);
+            assert!(matches!(r, Err(Error::Cancelled)), "{fmt:?}: {r:?}");
+            assert!(!out.exists(), "{fmt:?}");
+            assert_eq!(fs::read_dir(t.path()).unwrap().count(), 1, "{fmt:?}: temp files left");
+        }
+    }
+
+    #[test]
     fn parallel_gzip_multi_member() {
         let t = tempfile::tempdir().unwrap();
         let f = t.path().join("big.bin");
