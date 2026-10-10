@@ -107,7 +107,26 @@ impl Format {
     /// Detect format from a file name (by extension).
     pub fn detect(path: &Path) -> Option<Format> {
         let n = path.file_name()?.to_string_lossy().to_lowercase();
-        let pairs: &[(&str, Format)] = &[
+        EXT_TABLE.iter().find(|(e, _)| n.ends_with(e)).map(|(_, f)| *f)
+    }
+}
+
+/// File name without its archive extension (`foo.tar.gz` -> `foo`).
+pub fn archive_stem(path: &Path) -> String {
+    let name = path.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+    let lower = name.to_lowercase();
+    match EXT_TABLE.iter().find(|(e, _)| lower.ends_with(e)) {
+        Some((e, _)) if name.len() > e.len() => name[..name.len() - e.len()].to_string(),
+        _ => name,
+    }
+}
+
+/// All recognised archive file extensions (without leading dot), e.g. for shell registration.
+pub fn archive_extensions() -> Vec<&'static str> {
+    EXT_TABLE.iter().map(|(e, _)| e.trim_start_matches('.')).collect()
+}
+
+const EXT_TABLE: &[(&str, Format)] = &[
             (".tar.gz", Format::TarGz), (".tgz", Format::TarGz),
             (".tar.bz2", Format::TarBz2), (".tbz2", Format::TarBz2), (".tbz", Format::TarBz2),
             (".tar.xz", Format::TarXz), (".txz", Format::TarXz),
@@ -115,10 +134,7 @@ impl Format {
             (".tar", Format::Tar), (".zip", Format::Zip), (".jar", Format::Zip),
             (".7z", Format::SevenZ), (".rar", Format::Rar),
             (".gz", Format::Gz), (".bz2", Format::Bz2), (".xz", Format::Xz), (".zst", Format::Zst),
-        ];
-        pairs.iter().find(|(e, _)| n.ends_with(e)).map(|(_, f)| *f)
-    }
-}
+];
 
 #[derive(Debug, Clone)]
 pub struct Entry {
@@ -713,6 +729,14 @@ mod tests {
         assert_eq!(Format::detect(Path::new("a.tar.zst")), Some(Format::TarZst));
         assert_eq!(Format::detect(Path::new("a.rar")), Some(Format::Rar));
         assert_eq!(Format::detect(Path::new("a.txt")), None);
+    }
+
+    #[test]
+    fn stems() {
+        assert_eq!(archive_stem(Path::new("/x/My.Backup.tar.GZ")), "My.Backup");
+        assert_eq!(archive_stem(Path::new("a.zip")), "a");
+        assert_eq!(archive_stem(Path::new("notes.txt")), "notes.txt");
+        assert!(archive_extensions().contains(&"tar.zst"));
     }
 
     #[test]

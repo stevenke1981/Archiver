@@ -31,3 +31,24 @@ jobs:
         run: cargo build --release --locked
       - name: Test
         run: cargo test --locked
+      - name: Shell integration smoke test (register / unregister)
+        shell: bash
+        env:
+          MSYS2_ARG_CONV_EXCL: "*"
+        run: |
+          B=target/release/rust-archiver
+          [ "$RUNNER_OS" = "Windows" ] && B=target/release/rust-archiver.exe
+          $B --register-shell
+          case "$RUNNER_OS" in
+            Windows) reg query 'HKCU\Software\Classes\SystemFileAssociations\.zip\shell\RustArchiver\shell\02extracthere\command' /ve
+                     reg query 'HKCU\Software\Classes\Directory\shell\RustArchiver' ;;
+            macOS)   ls -R ~/Library/Services | grep -i "rust archiver"
+                     plutil -lint ~/Library/Services/*Rust\ Archiver*.workflow/Contents/Info.plist ~/Library/Services/*Rust\ Archiver*.workflow/Contents/document.wflow ;;
+            Linux)   cat ~/.local/share/applications/rust-archiver.desktop
+                     ls -la ~/.local/share/nautilus/scripts/"Rust Archiver" ~/.local/share/nemo/actions ;;
+          esac
+          $B --unregister-shell
+          if [ "$RUNNER_OS" = "Windows" ]; then ! reg query 'HKCU\Software\Classes\Directory\shell\RustArchiver' 2>/dev/null; fi
+      - name: Validate app Info.plist
+        if: runner.os == 'macOS'
+        run: plutil -lint scripts/Info.plist

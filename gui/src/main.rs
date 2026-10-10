@@ -10,8 +10,39 @@ use std::sync::{Arc, Mutex};
 use archiver_core::{CreateOptions, Entry, Format, Progress};
 use eframe::egui;
 
+mod args;
+mod shell;
+
+use args::Action;
+
 fn main() -> eframe::Result {
-    let initial = std::env::args_os().nth(1).map(PathBuf::from);
+    let action = match args::parse(std::env::args_os().skip(1)) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(2);
+        }
+    };
+    match action {
+        Action::Help => {
+            println!("{}", args::USAGE);
+            return Ok(());
+        }
+        Action::RegisterShell | Action::UnregisterShell => {
+            let r = if action == Action::RegisterShell { shell::register() } else { shell::unregister() };
+            match r {
+                Ok(msg) => {
+                    println!("{msg}");
+                    return Ok(());
+                }
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        _ => {}
+    }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_drag_and_drop(true)
@@ -26,9 +57,8 @@ fn main() -> eframe::Result {
         Box::new(move |cc| {
             install_fonts(&cc.egui_ctx);
             let mut app = App::default();
-            if let Some(p) = initial {
-                app.open_archive(p);
-            }
+            app.shell_registered = shell::is_registered();
+            app.startup(action);
             Ok(Box::new(app))
         }),
     )
@@ -106,6 +136,19 @@ struct App {
     job: Option<Job>,
     create: CreateDlg,
     filter: String,
+    /// Close the window after a context-menu extraction succeeds.
+    close_when_done: bool,
+    close_now: bool,
+    shell_window: bool,
+    shell_registered: bool,
+    /// Archive to open in the GUI if a context-menu extraction fails (e.g. needs a password).
+    fallback_open: Option<PathBuf>,
+}
+
+/// Destination for "extract here" / "extract to folder".
+pub fn extract_dest(archive: &Path, to_folder: bool) -> PathBuf {
+    let dir = archive.parent().map(Path::to_path_buf).unwrap_or_default();
+    if to_folder { dir.join(archiver_core::archive_stem(archive)) } else { dir }
 }
 
 fn human(n: u64) -> String {
@@ -142,6 +185,38 @@ impl App {
             let _ = tx.send(f(&prog));
         });
         self.job = Some(Job { title: title.into(), rx, cancel, progress });
+    }
+
+    fn startup(&mut self, action: Action) {
+        match action {
+            Action::Open(p) => self.open_archive(p),
+            Action::Compress(files) => self.add_inputs(files),
+            Action::ExtractHere(files) => self.extract_batch(files, false),
+            Action::ExtractToFolder(files) => self.extract_batch(files, true),
+            _ => {}
+        }
+    }
+
+    /// Extract several archives next to themselves (context-menu actions).
+    fn extract_batch(&mut self, files: Vec<PathBuf>, to_folder: bool) {
+        let jobs: Vec<(PathBuf, PathBuf)> = files.into_iter().map(|f| {
+            let d = extract_dest(&f, to_folder);
+            (f, d)
+        }).collect();
+        if jobs.len() == 1 {
+            self.fallback_open = Some(jobs[0].0.clone());
+        }
+        self.close_when_done = true;
+        self.spawn("解壓縮中 / Extracting", move |p| {
+            let mut ok = Vec::new();
+            for (arc, dest) in &jobs {
+                if let Err(e) = archiver_core::extract(arc, dest, None, None, p) {
+                    return Msg::Done(Err(format!("{}: {e}", arc.display())));
+                }
+                ok.push(dest.display().to_string());
+            }
+            Msg::Done(Ok(format!("已解壓縮到 / Extracted to {}", ok.join(", "))))
+        });
     }
 
     fn open_archive(&mut self, path: PathBuf) {
@@ -227,6 +302,9 @@ impl App {
                 Msg::Listed(p, Err(e)) => self.status = format!("無法開啟 / Cannot open {}: {e}", p.display()),
                 Msg::Done(Ok(s)) => {
                     self.status = s;
+                    if self.close_when_done {
+                        self.close_now = true;
+                    }
                     if let Some(a) = self.archive.clone() {
                         if !a.exists() {
                             self.archive = None;
@@ -234,7 +312,15 @@ impl App {
                         }
                     }
                 }
-                Msg::Done(Err(e)) => self.status = format!("錯誤 / Error: {e}"),
+                Msg::Done(Err(e)) => {
+                    self.status = format!("錯誤 / Error: {e}");
+                    self.close_when_done = false;
+                    if let Some(p) = self.fallback_open.take() {
+                        // e.g. encrypted archive: open it so the user can type a password
+                        self.open_archive(p);
+                        self.status = format!("錯誤 / Error: {e} — 請輸入密碼後再解壓 / enter password and extract");
+                    }
+                }
             }
         }
     }
@@ -277,6 +363,10 @@ impl App {
                     if let Some(f) = rfd::FileDialog::new().pick_folder() {
                         self.add_inputs(vec![f]);
                     }
+                }
+                if ui.button("⚙ 右鍵選單 Shell menu").clicked() {
+                    self.shell_registered = shell::is_registered();
+                    self.shell_window = true;
                 }
                 ui.separator();
                 ui.label("🔑 密碼 Password:");
@@ -434,6 +524,39 @@ impl App {
     }
 }
 
+impl App {
+    fn shell_settings(&mut self, ctx: &egui::Context) {
+        if !self.shell_window {
+            return;
+        }
+        let mut open = true;
+        egui::Window::new("右鍵選單整合 / Context menu integration").open(&mut open).show(ctx, |ui| {
+            let what = if cfg!(windows) {
+                "Windows 檔案總管（目前使用者 HKCU，不需系統管理員）\nWindows Explorer (current user, no admin)"
+            } else if cfg!(target_os = "macos") {
+                "Finder 快速動作（~/Library/Services）\nFinder Quick Actions"
+            } else {
+                "Nautilus / Dolphin / Nemo + .desktop MIME 關聯\nLinux file managers"
+            };
+            ui.label(what);
+            ui.separator();
+            let mut on = self.shell_registered;
+            if ui.checkbox(&mut on, "啟用右鍵選單 / Enable context menu").changed() {
+                let r = if on { shell::register() } else { shell::unregister() };
+                self.status = match r {
+                    Ok(m) => m,
+                    Err(e) => format!("錯誤 / Error: {e}"),
+                };
+                self.shell_registered = shell::is_registered();
+            }
+            ui.small("若移動了程式位置，請重新啟用一次 / Re-enable after moving the executable.");
+        });
+        if !open {
+            self.shell_window = false;
+        }
+    }
+}
+
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
@@ -464,6 +587,10 @@ impl eframe::App for App {
         });
         egui::CentralPanel::default().show(ui, |ui| self.table(ui));
         self.create_window(&ctx);
+        self.shell_settings(&ctx);
+        if self.close_now {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
 
         if ctx.input(|i| !i.raw.hovered_files.is_empty()) {
             let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("drop")));
@@ -471,5 +598,18 @@ impl eframe::App for App {
             painter.rect_filled(rect, 0.0, egui::Color32::from_black_alpha(160));
             painter.text(rect.center(), egui::Align2::CENTER_CENTER, "放開以加入 / Drop to add", egui::FontId::proportional(28.0), egui::Color32::WHITE);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_destinations() {
+        let a = Path::new("/data/in/Photos 2024.tar.gz");
+        assert_eq!(extract_dest(a, false), Path::new("/data/in"));
+        assert_eq!(extract_dest(a, true), Path::new("/data/in/Photos 2024"));
+        assert_eq!(extract_dest(Path::new("/x/a.ZIP"), true), Path::new("/x/a"));
     }
 }
