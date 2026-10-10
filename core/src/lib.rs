@@ -239,7 +239,12 @@ fn encoder(fmt: Format, w: impl Write + 'static, level: Option<u32>) -> Result<B
     Ok(match fmt {
         Format::Tar => Box::new(Plain(w)),
         Format::TarGz | Format::Gz => {
-            Box::new(flate2::write::GzEncoder::new(w, flate2::Compression::new(lvl.min(9))))
+            let t = threads() as usize;
+            if t > 1 {
+                Box::new(ParGzWriter::new(w, lvl.min(9), t))
+            } else {
+                Box::new(flate2::write::GzEncoder::new(w, flate2::Compression::new(lvl.min(9))))
+            }
         }
         Format::TarBz2 | Format::Bz2 => {
             Box::new(bzip2::write::BzEncoder::new(w, bzip2::Compression::new(lvl.clamp(1, 9))))
@@ -289,6 +294,98 @@ impl<W: Write> FinishWrite for liblzma::write::XzEncoder<W> {
 }
 impl<W: Write> FinishWrite for zstd::stream::write::Encoder<'static, W> {
     fn finish_box(self: Box<Self>) -> io::Result<()> { self.finish()?.flush() }
+}
+
+/// Opens the file on first read and closes it at EOF (keeps few descriptors open
+/// while thousands of files are queued for a solid 7z block).
+struct LazyFile {
+    path: PathBuf,
+    f: Option<BufReader<File>>,
+    finished: bool,
+}
+impl LazyFile {
+    fn new(path: &Path) -> Self {
+        Self { path: path.to_path_buf(), f: None, finished: false }
+    }
+}
+impl Read for LazyFile {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.finished {
+            return Ok(0);
+        }
+        if self.f.is_none() {
+            let f = File::open(&self.path)?;
+            let len = f.metadata().map(|m| m.len()).unwrap_or(0) as usize;
+            self.f = Some(BufReader::with_capacity(len.clamp(8 << 10, BUF), f));
+        }
+        let n = self.f.as_mut().unwrap().read(buf)?;
+        if n == 0 && !buf.is_empty() {
+            self.f = None;
+            self.finished = true;
+        }
+        Ok(n)
+    }
+}
+
+/// Parallel gzip: input is cut into fixed blocks, each compressed on its own thread into a
+/// complete gzip member; members are written in order. The result is a standard multi-member
+/// gzip file (RFC 1952) readable by gzip/zcat/7-Zip; ratio loss is tiny for 4 MiB blocks.
+struct ParGzWriter<W: Write> {
+    out: W,
+    level: u32,
+    max_inflight: usize,
+    buf: Vec<u8>,
+    inflight: std::collections::VecDeque<std::thread::JoinHandle<io::Result<Vec<u8>>>>,
+}
+const GZ_BLOCK: usize = 4 << 20;
+impl<W: Write> ParGzWriter<W> {
+    fn new(out: W, level: u32, threads: usize) -> Self {
+        Self { out, level, max_inflight: threads, buf: Vec::with_capacity(GZ_BLOCK), inflight: Default::default() }
+    }
+    fn dispatch(&mut self) -> io::Result<()> {
+        let block = std::mem::replace(&mut self.buf, Vec::with_capacity(GZ_BLOCK));
+        let level = self.level;
+        self.inflight.push_back(std::thread::spawn(move || {
+            let mut e = flate2::write::GzEncoder::new(Vec::with_capacity(block.len() / 2), flate2::Compression::new(level));
+            e.write_all(&block)?;
+            e.finish()
+        }));
+        while self.inflight.len() >= self.max_inflight {
+            self.drain_one()?;
+        }
+        Ok(())
+    }
+    fn drain_one(&mut self) -> io::Result<()> {
+        if let Some(h) = self.inflight.pop_front() {
+            let data = h.join().map_err(|_| io::Error::other("gzip worker panicked"))??;
+            self.out.write_all(&data)?;
+        }
+        Ok(())
+    }
+}
+impl<W: Write> Write for ParGzWriter<W> {
+    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+        let n = data.len().min(GZ_BLOCK - self.buf.len());
+        self.buf.extend_from_slice(&data[..n]);
+        if self.buf.len() == GZ_BLOCK {
+            self.dispatch()?;
+        }
+        Ok(n)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+impl<W: Write> FinishWrite for ParGzWriter<W> {
+    fn finish_box(mut self: Box<Self>) -> io::Result<()> {
+        if !self.buf.is_empty() || self.inflight.is_empty() {
+            self.dispatch()?;
+        }
+        while !self.inflight.is_empty() {
+            self.drain_one()?;
+        }
+        self.out.flush()
+    }
 }
 
 /// Reader wrapper reporting progress (throttled to every 1 MiB to keep callbacks cheap).
@@ -395,7 +492,7 @@ pub fn list(path: &Path, password: Option<&str>) -> Result<Vec<Entry>> {
     let mut out = Vec::new();
     match fmt {
         Format::Zip => {
-            let mut z = zip::ZipArchive::new(rd(File::open(path)?))?;
+            let mut z = zip::ZipArchive::new(BufReader::new(File::open(path)?))?;
             for i in 0..z.len() {
                 let f = z.by_index_raw(i)?;
                 let modified = f.last_modified().map(|d| {
@@ -477,7 +574,7 @@ pub fn extract(archive: &Path, dest: &Path, password: Option<&str>, selected: Op
     let done = AtomicU64::new(0);
     match fmt {
         Format::Zip => {
-            let mut z = zip::ZipArchive::new(rd(File::open(archive)?))?;
+            let mut z = zip::ZipArchive::new(BufReader::with_capacity(64 << 10, File::open(archive)?))?;
             let mut total = 0;
             for i in 0..z.len() {
                 let f = z.by_index_raw(i)?;
@@ -715,7 +812,7 @@ fn create_zip(output: &Path, items: &[Item], opts: &CreateOptions, done: &Atomic
     let merged = res.and_then(|_| {
         for path in &tmp {
             p.check()?;
-            z.merge_archive(zip::ZipArchive::new(rd(File::open(path)?))?)?;
+            z.merge_archive(zip::ZipArchive::new(BufReader::with_capacity(256 << 10, File::open(path)?))?)?;
         }
         z.finish()?.flush()?;
         Ok(())
@@ -754,17 +851,25 @@ pub fn create(output: &Path, inputs: &[PathBuf], opts: &CreateOptions, p: &Progr
                     Lzma2Options::from_level(lvl).into()
                 });
                 w.set_content_methods(methods);
+                // Directories and empty files carry no data stream.
+                let mut solid_entries = Vec::new();
+                let mut solid_readers = Vec::new();
                 for (path, name, is_dir) in &items {
-                    p.check()?;
                     let entry = sevenz_rust2::ArchiveEntry::from_path(path, name.clone());
-                    if *is_dir {
+                    let empty = !*is_dir && fs::metadata(path).map(|m| m.len() == 0).unwrap_or(true);
+                    if *is_dir || empty {
                         w.push_archive_entry::<File>(entry, None).map_err(|e| Error::SevenZ(e.to_string()))?;
                     } else {
-                        let pr = ProgReader::new(rd(File::open(path)?), &done, total, name, p);
-                        w.push_archive_entry(entry, Some(pr)).map_err(|e| {
-                            if p.cancel.load(Ordering::Relaxed) { Error::Cancelled } else { Error::SevenZ(e.to_string()) }
-                        })?;
+                        solid_entries.push(entry);
+                        solid_readers.push(sevenz_rust2::SourceReader::new(ProgReader::new(LazyFile::new(path), &done, total, name, p)));
                     }
+                }
+                // One solid block: better ratio, and lets multi-threaded LZMA2 split work across
+                // all files instead of compressing each small file on its own.
+                if !solid_entries.is_empty() {
+                    w.push_archive_entries(solid_entries, solid_readers).map_err(|e| {
+                        if p.cancel.load(Ordering::Relaxed) { Error::Cancelled } else { Error::SevenZ(e.to_string()) }
+                    })?;
                 }
                 w.finish()?;
                 Ok(())
@@ -830,6 +935,8 @@ mod tests {
         fs::write(root.join("hello.txt"), b"hello world\n".repeat(100)).unwrap();
         fs::write(root.join("sub/a.bin"), (0..50_000u32).map(|i| (i % 251) as u8).collect::<Vec<_>>()).unwrap();
         fs::write(root.join("sub/deeper/中文.txt"), "測試內容".as_bytes()).unwrap();
+        fs::write(root.join("sub/empty.txt"), b"").unwrap();
+        fs::create_dir_all(root.join("emptydir")).unwrap();
         root
     }
 
@@ -900,6 +1007,21 @@ mod tests {
             extract(&out, &dest, None, None, &Progress::none()).unwrap();
             assert_eq!(fs::read(dest.join("note.txt")).unwrap(), fs::read(&f).unwrap(), "{fmt:?}");
         }
+    }
+
+    #[test]
+    fn parallel_gzip_multi_member() {
+        let t = tempfile::tempdir().unwrap();
+        let f = t.path().join("big.bin");
+        let data: Vec<u8> = (0..(GZ_BLOCK * 2 + 12345)).map(|i| ((i * 31) ^ (i >> 7)) as u8).collect();
+        fs::write(&f, &data).unwrap();
+        let out = t.path().join("big.bin.gz");
+        create(&out, &[f], &CreateOptions { format: Format::Gz, level: Some(6), password: None }, &Progress::none()).unwrap();
+        // standard decoder must read all members
+        let mut d = flate2::read::MultiGzDecoder::new(File::open(&out).unwrap());
+        let mut back = Vec::new();
+        d.read_to_end(&mut back).unwrap();
+        assert_eq!(back, data);
     }
 
     #[test]
