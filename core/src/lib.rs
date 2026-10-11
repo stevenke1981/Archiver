@@ -143,6 +143,10 @@ pub struct Entry {
     pub compressed: Option<u64>,
     pub modified: Option<String>,
     pub is_dir: bool,
+    /// CRC32 of the uncompressed data, when the format stores it (ZIP, 7z, RAR).
+    pub crc32: Option<u32>,
+    /// Entry data is encrypted (ZIP/RAR; 7z reports encryption at archive level).
+    pub encrypted: bool,
 }
 
 /// Progress callback: (bytes_done, bytes_total, current item name). Shared cancel flag.
@@ -504,6 +508,8 @@ pub fn list(path: &Path, password: Option<&str>) -> Result<Vec<Entry>> {
                     compressed: Some(f.compressed_size()),
                     modified,
                     is_dir: f.is_dir(),
+                    crc32: if f.is_dir() { None } else { Some(f.crc32()) },
+                    encrypted: f.encrypted(),
                 });
             }
         }
@@ -521,6 +527,8 @@ pub fn list(path: &Path, password: Option<&str>) -> Result<Vec<Entry>> {
                     compressed: if e.compressed_size > 0 { Some(e.compressed_size) } else { None },
                     modified,
                     is_dir: e.is_directory,
+                    crc32: if e.has_crc { Some(e.crc as u32) } else { None },
+                    encrypted: false,
                 });
             }
         }
@@ -538,6 +546,8 @@ pub fn list(path: &Path, password: Option<&str>) -> Result<Vec<Entry>> {
                     compressed: None,
                     modified: None,
                     is_dir: h.is_directory(),
+                    crc32: if h.is_directory() { None } else { Some(h.file_crc) },
+                    encrypted: h.is_encrypted(),
                 });
             }
         }
@@ -545,7 +555,7 @@ pub fn list(path: &Path, password: Option<&str>) -> Result<Vec<Entry>> {
             let compressed = fs::metadata(path)?.len();
             let mut d = decoder(f, rd(File::open(path)?))?;
             let size = io::copy(&mut d, &mut io::sink())?;
-            out.push(Entry { name: single_inner_name(path), size, compressed: Some(compressed), modified: None, is_dir: false });
+            out.push(Entry { name: single_inner_name(path), size, compressed: Some(compressed), modified: None, is_dir: false, crc32: None, encrypted: false });
         }
         f => {
             let mut a = tar::Archive::new(decoder(f, rd(File::open(path)?))?);
@@ -558,6 +568,8 @@ pub fn list(path: &Path, password: Option<&str>) -> Result<Vec<Entry>> {
                     compressed: None,
                     modified: h.mtime().ok().and_then(|t| fmt_time(t as i64)),
                     is_dir: h.entry_type().is_dir(),
+                    crc32: None,
+                    encrypted: false,
                 });
             }
         }
@@ -675,6 +687,154 @@ pub fn extract(archive: &Path, dest: &Path, password: Option<&str>, selected: Op
         }
     }
     Ok(())
+}
+
+/// Test archive integrity by decompressing every entry (CRCs / checksums are verified by
+/// the decoders). Returns the number of files tested.
+pub fn test(archive: &Path, password: Option<&str>, p: &Progress) -> Result<usize> {
+    let fmt = detect_or_err(archive)?;
+    let done = AtomicU64::new(0);
+    let mut n = 0usize;
+    match fmt {
+        Format::Zip => {
+            let mut z = zip::ZipArchive::new(BufReader::with_capacity(64 << 10, File::open(archive)?))?;
+            let total: u64 = (0..z.len()).filter_map(|i| z.by_index_raw(i).ok().map(|f| f.size())).sum();
+            for i in 0..z.len() {
+                p.check()?;
+                let mut f = match password {
+                    Some(pw) => z.by_index_decrypt(i, pw.as_bytes())?,
+                    None => z.by_index(i)?,
+                };
+                if f.is_dir() { continue; }
+                let name = f.name()?.to_string();
+                copy_prog(&mut f, &mut io::sink(), &done, total, &name, p)?;
+                n += 1;
+            }
+        }
+        Format::SevenZ => {
+            let pw = password.map(sevenz_rust2::Password::from).unwrap_or_else(sevenz_rust2::Password::empty);
+            let mut r = sevenz_rust2::ArchiveReader::open(archive, pw).map_err(|e| Error::SevenZ(e.to_string()))?;
+            r.set_thread_count(threads());
+            let total: u64 = r.archive().files.iter().map(|e| e.size).sum();
+            let mut err = None;
+            r.for_each_entries(|e, rd| {
+                if e.is_directory { return Ok(true); }
+                match copy_prog(rd, &mut io::sink(), &done, total, &e.name, p) {
+                    Ok(()) => { n += 1; Ok(true) }
+                    Err(x) => { err = Some(x); Ok(false) }
+                }
+            }).map_err(|e| Error::SevenZ(e.to_string()))?;
+            if let Some(e) = err { return Err(e); }
+        }
+        Format::Rar => {
+            let a = match password {
+                Some(pw) => unrar::Archive::with_password(archive, pw),
+                None => unrar::Archive::new(archive),
+            };
+            let mut cur = a.open_for_processing().map_err(|e| Error::Rar(e.to_string()))?;
+            while let Some(h) = cur.read_header().map_err(|e| Error::Rar(e.to_string()))? {
+                p.check()?;
+                let file = h.entry().is_file();
+                cur = h.test().map_err(|e| Error::Rar(e.to_string()))?;
+                if file { n += 1; }
+            }
+        }
+        f if f.is_single_file() => {
+            let total = fs::metadata(archive)?.len();
+            let d = decoder(f, rd(File::open(archive)?))?;
+            copy_prog(d, &mut io::sink(), &done, total, &single_inner_name(archive), p)?;
+            n = 1;
+        }
+        f => {
+            let mut a = tar::Archive::new(decoder(f, rd(File::open(archive)?))?);
+            for e in a.entries()? {
+                p.check()?;
+                let mut e = e?;
+                if e.header().entry_type().is_file() {
+                    io::copy(&mut e, &mut io::sink())?;
+                    n += 1;
+                }
+            }
+        }
+    }
+    Ok(n)
+}
+
+/// Delete entries (files, or folders including their contents) from an archive by rewriting it.
+/// ZIP entries are copied raw (no recompression); other formats are re-encoded.
+pub fn delete(archive: &Path, names: &[String], password: Option<&str>, p: &Progress) -> Result<()> {
+    let fmt = detect_or_err(archive)?;
+    if !fmt.can_create() || fmt.is_single_file() {
+        return Err(Error::Unsupported(format!("cannot delete entries from {}", fmt.label())));
+    }
+    let tmp = {
+        let mut n = archive.as_os_str().to_owned();
+        n.push(".rewrite.tmp");
+        PathBuf::from(n)
+    };
+    let hit = |name: &str| wanted(Some(names), name);
+    let res = (|| -> Result<()> {
+        if fmt == Format::Zip {
+            let mut src = zip::ZipArchive::new(BufReader::with_capacity(256 << 10, File::open(archive)?))?;
+            let mut out = zip::ZipWriter::new(wr(File::create(&tmp)?));
+            for i in 0..src.len() {
+                p.check()?;
+                let f = src.by_index_raw(i)?;
+                if !hit(&f.name()?) {
+                    out.raw_copy_file(f)?;
+                }
+            }
+            out.finish()?.flush()?;
+            return Ok(());
+        }
+        // generic: extract kept entries to a temp dir, then recreate with the same format
+        let work = tempdir_near(archive)?;
+        let res = (|| -> Result<()> {
+            let kept: Vec<Entry> = list(archive, password)?.into_iter().filter(|e| !hit(&e.name)).collect();
+            // select files only (a folder name would select its deleted children too)
+            let keep: Vec<String> = kept.iter().filter(|e| !e.is_dir).map(|e| e.name.clone()).collect();
+            if !keep.is_empty() {
+                extract(archive, &work, password, Some(&keep), p)?;
+            }
+            for d in kept.iter().filter(|e| e.is_dir) {
+                if let Some(path) = safe_join(&work, &d.name) {
+                    fs::create_dir_all(path)?;
+                }
+            }
+            let mut inputs: Vec<PathBuf> = fs::read_dir(&work)?.filter_map(|e| e.ok().map(|e| e.path())).collect();
+            inputs.sort();
+            if inputs.is_empty() {
+                return Err(Error::Unsupported("cannot delete every entry of an archive".into()));
+            }
+            // tmp must carry the archive's extension so `create` picks the right format
+            let opts = CreateOptions { format: fmt, level: None, password: password.map(str::to_string) };
+            create(&tmp, &inputs, &opts, p)
+        })();
+        let _ = fs::remove_dir_all(&work);
+        res
+    })();
+    match res {
+        Ok(()) => {
+            fs::rename(&tmp, archive)?;
+            Ok(())
+        }
+        Err(e) => {
+            let _ = fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
+}
+
+fn tempdir_near(archive: &Path) -> Result<PathBuf> {
+    let base = std::env::temp_dir();
+    let stem = archive.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+    for i in 0..1000u32 {
+        let d = base.join(format!("archiver-{}-{}-{i}", std::process::id(), stem));
+        if fs::create_dir(&d).is_ok() {
+            return Ok(d);
+        }
+    }
+    Err(Error::Io(io::Error::other("cannot create temp dir")))
 }
 
 struct CountingReader<R> { inner: R, count: Arc<std::sync::atomic::AtomicU64> }
@@ -1007,6 +1167,40 @@ mod tests {
             extract(&out, &dest, None, None, &Progress::none()).unwrap();
             assert_eq!(fs::read(dest.join("note.txt")).unwrap(), fs::read(&f).unwrap(), "{fmt:?}");
         }
+    }
+
+    #[test]
+    fn crc_and_test_and_delete() {
+        for fmt in [Format::Zip, Format::SevenZ, Format::TarGz, Format::TarZst] {
+            let t = tempfile::tempdir().unwrap();
+            let src = sample(t.path());
+            let out = t.path().join(format!("a.{}", fmt.extension()));
+            create(&out, &[src], &CreateOptions { format: fmt, level: None, password: None }, &Progress::none()).unwrap();
+            let l = list(&out, None).unwrap();
+            let hello = l.iter().find(|e| e.name.ends_with("hello.txt")).unwrap();
+            if matches!(fmt, Format::Zip | Format::SevenZ) {
+                assert_eq!(hello.crc32, Some(crc32fast::hash(&b"hello world\n".repeat(100))), "{fmt:?}");
+            }
+            assert_eq!(test(&out, None, &Progress::none()).unwrap(), 4, "{fmt:?}");
+            delete(&out, &["data/sub".to_string()], None, &Progress::none()).unwrap();
+            let names: Vec<String> = list(&out, None).unwrap().into_iter().map(|e| e.name).collect();
+            assert!(names.iter().any(|n| n.ends_with("hello.txt")), "{fmt:?} {names:?}");
+            assert!(!names.iter().any(|n| n.contains("sub/")), "{fmt:?} {names:?}");
+            assert!(!t.path().join(format!("a.{}.rewrite.tmp", fmt.extension())).exists());
+        }
+    }
+
+    #[test]
+    fn test_detects_corruption() {
+        let t = tempfile::tempdir().unwrap();
+        let src = sample(t.path());
+        let out = t.path().join("c.zip");
+        create(&out, &[src], &CreateOptions { format: Format::Zip, level: Some(0), password: None }, &Progress::none()).unwrap();
+        let mut b = fs::read(&out).unwrap();
+        let pos = b.windows(11).position(|w| w == b"hello world").unwrap();
+        b[pos] ^= 0xFF;
+        fs::write(&out, b).unwrap();
+        assert!(test(&out, None, &Progress::none()).is_err());
     }
 
     #[test]

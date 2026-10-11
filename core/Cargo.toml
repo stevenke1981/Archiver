@@ -17,4 +17,5 @@ zip = { version = "9.0.1", default-features = false, features = ["aes-crypto", "
 zstd = { version = "0.14.1", default-features = false, features = ["zstdmt"] }
 
 [dev-dependencies]
+crc32fast = "1.5.2"
 tempfile = "3.27.0"
