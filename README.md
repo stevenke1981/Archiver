@@ -1,10 +1,22 @@
 # Archiver
 
-跨平台（Windows / Linux / macOS）的壓縮／解壓縮工具，類似 WinRAR。核心與 GUI 皆以 Rust 撰寫（GUI 使用 egui/eframe）。
+跨平台（Windows / Linux / macOS）的壓縮／解壓縮工具，介面仿 WinRAR 主視窗。核心與 GUI 皆以 Rust 撰寫（GUI 使用 [Slint](https://slint.dev/)，軟體繪製器，不需 GPU）。
 
 ![screenshot](docs/screenshot.png)
 
 ## 功能
+
+### 主視窗（v0.5.0 起，Slint）
+
+- 選單列：檔案(F)、指令(C)、工具(S)、我的最愛(O)、選項(N)、說明(H)
+- 大圖示工具列：加入、解壓縮到、測試（完整性檢查）、檢視、刪除（重寫壓縮檔）、尋找、精靈、資訊；防毒／註解／自解尚未支援（灰色）。圖示為本專案自繪 SVG
+- 路徑列與「上一層」按鈕：`壓縮檔.zip\子資料夾 - ZIP 壓縮檔, 未封裝大小 N 位元組`
+- 檔案清單：名稱、大小、封裝後、類型、修改日期、CRC32；`..` 回上層、雙擊進入壓縮檔內的資料夾、點欄位標題排序、Ctrl/Shift 多選、雙擊檔案會解壓到暫存資料夾並用系統預設程式開啟
+- 狀態列：`總共 N 個檔案, X 個位元組` 與選取資訊
+- 未開啟壓縮檔時即為檔案管理員模式，可瀏覽本機資料夾，雙擊壓縮檔即開啟
+- 鍵盤：Enter 開啟、Backspace 上一層、Delete 刪除、Ctrl+A 全選
+
+### 一般
 
 - 開啟壓縮檔並列出內容（名稱、大小、壓縮後大小、修改時間），支援搜尋過濾
 - 全部解壓縮或只解壓縮選取的檔案／資料夾（Ctrl/Shift 多選）
@@ -120,7 +132,7 @@ MIT
 
 ## English summary
 
-**Archiver** is a WinRAR-like, cross-platform (Windows/Linux/macOS) archive manager with a Rust core library and an egui GUI.
+**Archiver** (GUI rewritten in Slint in v0.5.0 with a WinRAR-style main window: menu bar, large-icon toolbar with original SVG icons — Add, Extract To, Test, View, Delete, Find, Wizard, Info — path bar with up button, sortable file list with Name/Size/Packed/Type/Modified/CRC32, folder navigation inside archives, file-manager mode when no archive is open, status bar) is a WinRAR-like, cross-platform (Windows/Linux/macOS) archive manager with a Rust core library and a Slint GUI.
 It can open and list archives, extract all or selected entries, and create ZIP, 7z, TAR, TAR.GZ/BZ2/XZ/ZST and single-file GZ/BZ2/XZ/ZST archives with selectable compression level.
 ZIP and 7z support AES-256 passwords; RAR (v4/v5) is **extract-only** because the RAR compression format is proprietary and the UnRAR license forbids re-creating a RAR compressor.
 Work runs on a background thread with a progress bar and cancel button; drag-and-drop opens archives or adds files to a new archive.

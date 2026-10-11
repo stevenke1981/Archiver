@@ -1,0 +1,453 @@
+import { Button, ComboBox, LineEdit, Slider, CheckBox, ProgressIndicator, ScrollView, ListView } from "std-widgets.slint";
+
+export struct Row {
+    name: string,
+    size: string,
+    packed: string,
+    kind: string,
+    modified: string,
+    crc: string,
+    // 0 parent, 1 folder, 2 file, 3 archive, 4 exe, 5 text, 6 image
+    icon: int,
+    selected: bool,
+}
+
+component ToolButton inherits Rectangle {
+    in property <image> icon;
+    in property <string> label;
+    in property <bool> enabled: true;
+    callback clicked;
+    width: 54px;
+    height: 56px;
+    border-radius: 3px;
+    background: ta.has-hover && root.enabled ? (ta.pressed ? #cce4f7 : #e5f1fb) : transparent;
+    border-width: ta.has-hover && root.enabled ? 1px : 0px;
+    border-color: #99c9ef;
+    VerticalLayout {
+        padding: 3px;
+        spacing: 2px;
+        alignment: center;
+        HorizontalLayout {
+            alignment: center;
+            Image {
+                source: root.icon;
+                width: 32px;
+                height: 32px;
+                opacity: root.enabled ? 1.0 : 0.3;
+            }
+        }
+        Text {
+            text: root.label;
+            horizontal-alignment: center;
+            font-size: 12px;
+            color: root.enabled ? #000 : #a0a0a0;
+        }
+    }
+    ta := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+}
+
+component HeaderCell inherits Rectangle {
+    in property <string> text;
+    in property <int> column;
+    in property <int> sort-column;
+    in property <bool> sort-ascending;
+    in property <bool> align-right: false;
+    callback sort(int);
+    background: hta.has-hover ? #e5f1fb : #ffffff;
+    Rectangle {
+        x: parent.width - 1px;
+        width: 1px;
+        background: #e5e5e5;
+    }
+    Text {
+        x: 6px;
+        width: parent.width - 12px;
+        text: root.text;
+        vertical-alignment: center;
+        horizontal-alignment: root.align-right ? TextHorizontalAlignment.right : TextHorizontalAlignment.left;
+        font-size: 12px;
+        overflow: elide;
+    }
+    if root.sort-column == root.column: Text {
+        y: -1px;
+        x: (parent.width - self.width) / 2;
+        text: root.sort-ascending ? "˄" : "˅";
+        font-size: 9px;
+        color: #808080;
+    }
+    hta := TouchArea {
+        clicked => { root.sort(root.column); }
+    }
+}
+
+export component AppWindow inherits Window {
+    title: root.window-title;
+    icon: @image-url("icons/app.svg");
+    preferred-width: 1000px;
+    preferred-height: 560px;
+    min-width: 640px;
+    min-height: 380px;
+    background: #ffffff;
+    default-font-size: 12px;
+
+    in property <string> window-title: "Archiver";
+    in property <[Row]> rows;
+    in property <string> path-text;
+    in property <string> status-left;
+    in property <string> status-right;
+    in property <bool> archive-open;
+    in property <bool> can-delete;
+    in property <int> sort-column: 0;
+    in property <bool> sort-ascending: true;
+
+    // background job
+    in property <bool> busy;
+    in property <float> progress;
+    in property <string> progress-text;
+
+    // dialogs: "", "create", "info", "shell", "find"
+    in-out property <string> dialog: "";
+    in property <string> create-sources;
+    in property <[string]> formats;
+    in-out property <int> format-index;
+    in-out property <float> level: 6;
+    in property <float> level-min: 0;
+    in property <float> level-max: 9;
+    in property <bool> level-enabled: true;
+    in property <bool> password-enabled: true;
+    in property <bool> single-file-warning: false;
+    in-out property <string> create-password;
+    in-out property <string> create-output;
+    in property <string> info-text;
+    in-out property <bool> shell-enabled;
+    in property <string> shell-description;
+    in-out property <string> find-text;
+    in-out property <string> archive-password;
+
+    callback action(string);
+    callback row-clicked(int, bool, bool);
+    callback row-double-clicked(int);
+    callback sort(int);
+    callback format-changed(int);
+    callback shell-toggled(bool);
+    callback key(string);
+
+    property <length> w-size: 92px;
+    property <length> w-packed: 92px;
+    property <length> w-kind: 130px;
+    property <length> w-date: 140px;
+    property <length> w-crc: 80px;
+
+    MenuBar {
+        Menu {
+            title: "檔案(F)";
+            MenuItem { title: "開啟壓縮檔…"; activated => { root.action("open"); } }
+            MenuItem { title: "新增壓縮檔…"; activated => { root.action("add"); } }
+            MenuSeparator { }
+            MenuItem { title: "壓縮檔密碼…"; activated => { root.action("password"); } }
+            MenuItem { title: "全選"; activated => { root.action("select-all"); } }
+            MenuSeparator { }
+            MenuItem { title: "結束"; activated => { root.action("exit"); } }
+        }
+        Menu {
+            title: "指令(C)";
+            MenuItem { title: "加入檔案到壓縮檔"; activated => { root.action("add"); } }
+            MenuItem { title: "解壓縮到指定資料夾"; activated => { root.action("extract"); } }
+            MenuItem { title: "測試壓縮檔"; activated => { root.action("test"); } }
+            MenuItem { title: "檢視檔案"; activated => { root.action("view"); } }
+            MenuItem { title: "刪除檔案"; enabled: root.can-delete; activated => { root.action("delete"); } }
+        }
+        Menu {
+            title: "工具(S)";
+            MenuItem { title: "精靈"; activated => { root.action("wizard"); } }
+            MenuItem { title: "尋找檔案"; activated => { root.action("find"); } }
+            MenuItem { title: "顯示資訊"; activated => { root.action("info"); } }
+        }
+        Menu {
+            title: "我的最愛(O)";
+            MenuItem { title: "（尚無項目）"; enabled: false; }
+        }
+        Menu {
+            title: "選項(N)";
+            MenuItem { title: "右鍵選單整合…"; activated => { root.action("shell"); } }
+        }
+        Menu {
+            title: "說明(H)";
+            MenuItem { title: "關於 Archiver"; activated => { root.action("about"); } }
+        }
+    }
+
+    VerticalLayout {
+        spacing: 0;
+        // toolbar
+        Rectangle {
+            height: 62px;
+            background: #ffffff;
+            HorizontalLayout {
+                padding-left: 6px;
+                padding-top: 3px;
+                padding-bottom: 3px;
+                spacing: 2px;
+                alignment: start;
+                ToolButton { icon: @image-url("icons/add.svg"); label: "加入"; clicked => { root.action("add"); } }
+                ToolButton { icon: @image-url("icons/extract.svg"); label: "解壓縮到"; clicked => { root.action("extract"); } }
+                ToolButton { icon: @image-url("icons/test.svg"); label: "測試"; clicked => { root.action("test"); } }
+                ToolButton { icon: @image-url("icons/view.svg"); label: "檢視"; clicked => { root.action("view"); } }
+                ToolButton { icon: @image-url("icons/delete.svg"); label: "刪除"; enabled: root.can-delete; clicked => { root.action("delete"); } }
+                ToolButton { icon: @image-url("icons/find.svg"); label: "尋找"; clicked => { root.action("find"); } }
+                ToolButton { icon: @image-url("icons/wizard.svg"); label: "精靈"; clicked => { root.action("wizard"); } }
+                ToolButton { icon: @image-url("icons/info.svg"); label: "資訊"; clicked => { root.action("info"); } }
+                Rectangle { width: 9px; Rectangle { x: 4px; width: 1px; height: 46px; background: #d0d0d0; } }
+                ToolButton { icon: @image-url("icons/antivirus.svg"); label: "防毒"; enabled: false; }
+                ToolButton { icon: @image-url("icons/comment.svg"); label: "註解"; enabled: false; }
+                ToolButton { icon: @image-url("icons/sfx.svg"); label: "自解"; enabled: false; }
+            }
+        }
+        // path bar
+        Rectangle {
+            height: 26px;
+            background: #f0f0f0;
+            HorizontalLayout {
+                padding: 2px;
+                spacing: 4px;
+                Rectangle {
+                    width: 24px;
+                    border-radius: 2px;
+                    background: upta.has-hover ? #e5f1fb : transparent;
+                    Image { source: @image-url("icons/up.svg"); width: 16px; height: 16px; }
+                    upta := TouchArea { clicked => { root.action("up"); } }
+                }
+                Rectangle {
+                    background: #ffffff;
+                    border-width: 1px;
+                    border-color: #7a7a7a;
+                    HorizontalLayout {
+                        padding-left: 4px;
+                        spacing: 4px;
+                        Image {
+                            width: 16px;
+                            source: root.archive-open ? @image-url("icons/archive.svg") : @image-url("icons/folder.svg");
+                        }
+                        Text { text: root.path-text; vertical-alignment: center; overflow: elide; }
+                    }
+                }
+            }
+        }
+        // header
+        Rectangle {
+            height: 22px;
+            background: #ffffff;
+            HorizontalLayout {
+                HeaderCell { text: "名稱"; column: 0; sort-column: root.sort-column; sort-ascending: root.sort-ascending; sort(c) => { root.sort(c); } }
+                HeaderCell { width: root.w-size; text: "大小"; align-right: true; column: 1; sort-column: root.sort-column; sort-ascending: root.sort-ascending; sort(c) => { root.sort(c); } }
+                HeaderCell { width: root.w-packed; text: "封裝後"; align-right: true; column: 2; sort-column: root.sort-column; sort-ascending: root.sort-ascending; sort(c) => { root.sort(c); } }
+                HeaderCell { width: root.w-kind; text: "類型"; column: 3; sort-column: root.sort-column; sort-ascending: root.sort-ascending; sort(c) => { root.sort(c); } }
+                HeaderCell { width: root.w-date; text: "修改日期"; column: 4; sort-column: root.sort-column; sort-ascending: root.sort-ascending; sort(c) => { root.sort(c); } }
+                HeaderCell { width: root.w-crc; text: "CRC32"; column: 5; sort-column: root.sort-column; sort-ascending: root.sort-ascending; sort(c) => { root.sort(c); } }
+            }
+        }
+        // file list
+        fs := FocusScope {
+            vertical-stretch: 1;
+            key-pressed(event) => {
+                if (event.text == Key.Return) { root.key("enter"); return accept; }
+                if (event.text == Key.Backspace) { root.key("up"); return accept; }
+                if (event.text == Key.Delete) { root.key("delete"); return accept; }
+                if (event.modifiers.control && (event.text == "a" || event.text == "A")) { root.action("select-all"); return accept; }
+                reject
+            }
+            ListView {
+                for row[i] in root.rows: Rectangle {
+                    height: 20px;
+                    background: row.selected ? #cce8ff : (rta.has-hover ? #e5f3ff : transparent);
+                    HorizontalLayout {
+                        padding-left: 4px;
+                        HorizontalLayout {
+                            spacing: 4px;
+                            Image {
+                                width: 16px;
+                                height: 16px;
+                                y: 2px;
+                                source: row.icon <= 1 ? @image-url("icons/folder.svg")
+                                    : row.icon == 3 ? @image-url("icons/archive.svg")
+                                    : row.icon == 4 ? @image-url("icons/exe.svg")
+                                    : row.icon == 5 ? @image-url("icons/text.svg")
+                                    : row.icon == 6 ? @image-url("icons/image.svg")
+                                    : @image-url("icons/file.svg");
+                            }
+                            Text { text: row.name; vertical-alignment: center; overflow: elide; }
+                        }
+                        Text { width: root.w-size - 6px; text: row.size; horizontal-alignment: right; vertical-alignment: center; }
+                        Rectangle { width: 6px; }
+                        Text { width: root.w-packed - 6px; text: row.packed; horizontal-alignment: right; vertical-alignment: center; }
+                        Rectangle { width: 12px; }
+                        Text { width: root.w-kind - 6px; text: row.kind; vertical-alignment: center; overflow: elide; }
+                        Rectangle { width: 6px; }
+                        Text { width: root.w-date - 6px; text: row.modified; vertical-alignment: center; overflow: elide; }
+                        Rectangle { width: 6px; }
+                        Text { width: root.w-crc - 6px; text: row.crc; vertical-alignment: center; }
+                    }
+                    rta := TouchArea {
+                        pointer-event(ev) => {
+                            if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.left) {
+                                fs.focus();
+                                root.row-clicked(i, ev.modifiers.control || ev.modifiers.meta, ev.modifiers.shift);
+                            }
+                        }
+                        double-clicked => { root.row-double-clicked(i); }
+                    }
+                }
+            }
+        }
+        // status bar
+        Rectangle {
+            height: 24px;
+            background: #f0f0f0;
+            Rectangle { y: 0; height: 1px; background: #d9d9d9; }
+            HorizontalLayout {
+                padding-left: 8px;
+                padding-right: 8px;
+                Text { text: root.status-left; vertical-alignment: center; overflow: elide; }
+                Text { text: root.status-right; vertical-alignment: center; horizontal-alignment: right; overflow: elide; }
+            }
+            if root.busy: Rectangle {
+                background: #f0f0f0;
+                HorizontalLayout {
+                    padding-left: 8px;
+                    padding-right: 4px;
+                    spacing: 8px;
+                    Text { text: root.progress-text; vertical-alignment: center; overflow: elide; width: 40%; }
+                    ProgressIndicator { progress: root.progress; height: 14px; y: 5px; }
+                    Button { text: "取消"; height: 22px; clicked => { root.action("cancel"); } }
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------ dialogs
+    if root.dialog != "": Rectangle {
+        background: #00000040;
+        TouchArea { }
+        Rectangle {
+            width: root.dialog == "create" ? 560px : 440px;
+            height: dlg.preferred-height;
+            background: #f9f9f9;
+            border-width: 1px;
+            border-color: #8a8a8a;
+            drop-shadow-blur: 12px;
+            drop-shadow-color: #00000060;
+            dlg := VerticalLayout {
+                padding: 14px;
+                spacing: 8px;
+                Text {
+                    font-size: 15px;
+                    font-weight: 600;
+                    text: root.dialog == "create" ? "建立壓縮檔"
+                        : root.dialog == "info" ? "壓縮檔資訊"
+                        : root.dialog == "shell" ? "右鍵選單整合"
+                        : root.dialog == "password" ? "輸入密碼"
+                        : "尋找檔案";
+                }
+                if root.dialog == "create": VerticalLayout {
+                    spacing: 8px;
+                    Text { text: "來源（可拖曳更多檔案進來）："; }
+                    Rectangle {
+                        height: 70px;
+                        background: white;
+                        border-width: 1px;
+                        border-color: #c0c0c0;
+                        ScrollView {
+                            Text { x: 4px; y: 2px; text: root.create-sources; }
+                        }
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text { text: "格式："; vertical-alignment: center; width: 70px; }
+                        ComboBox {
+                            model: root.formats;
+                            current-index <=> root.format-index;
+                            selected => { root.format-changed(self.current-index); }
+                        }
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text { text: "壓縮等級："; vertical-alignment: center; width: 70px; }
+                        Slider {
+                            enabled: root.level-enabled;
+                            minimum: root.level-min;
+                            maximum: root.level-max;
+                            step: 1;
+                            value <=> root.level;
+                        }
+                        Text { width: 60px; vertical-alignment: center; text: root.level-enabled ? round(root.level) : "（不壓縮）"; }
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text { text: "密碼："; vertical-alignment: center; width: 70px; }
+                        LineEdit {
+                            enabled: root.password-enabled;
+                            input-type: password;
+                            placeholder-text: root.password-enabled ? "（選用，AES-256）" : "此格式不支援密碼";
+                            text <=> root.create-password;
+                        }
+                    }
+                    if root.single-file-warning: Text { text: "⚠ 此格式只能壓縮單一檔案，多個檔案請用 TAR.* 格式"; color: #b9770e; }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text { text: "輸出："; vertical-alignment: center; width: 70px; }
+                        LineEdit { text <=> root.create-output; }
+                        Button { text: "瀏覽…"; clicked => { root.action("create-browse"); } }
+                    }
+                    HorizontalLayout {
+                        alignment: end;
+                        spacing: 8px;
+                        Button { text: "確定"; primary: true; clicked => { root.action("create-ok"); } }
+                        Button { text: "取消"; clicked => { root.action("dialog-close"); } }
+                    }
+                }
+                if root.dialog == "info": VerticalLayout {
+                    spacing: 8px;
+                    Text { text: root.info-text; wrap: word-wrap; }
+                    HorizontalLayout { alignment: end; Button { text: "確定"; clicked => { root.action("dialog-close"); } } }
+                }
+                if root.dialog == "shell": VerticalLayout {
+                    spacing: 8px;
+                    Text { text: root.shell-description; wrap: word-wrap; }
+                    CheckBox {
+                        text: "在檔案總管 / 檔案管理員的右鍵選單中顯示 Archiver";
+                        checked <=> root.shell-enabled;
+                        toggled => { root.shell-toggled(self.checked); }
+                    }
+                    Text { text: "若搬移了程式位置，請重新啟用一次。"; color: #707070; }
+                    HorizontalLayout { alignment: end; Button { text: "關閉"; clicked => { root.action("dialog-close"); } } }
+                }
+                if root.dialog == "find": VerticalLayout {
+                    spacing: 8px;
+                    Text { text: root.archive-open ? "在整個壓縮檔中尋找名稱包含：" : "在目前資料夾中尋找名稱包含："; }
+                    LineEdit { text <=> root.find-text; accepted => { root.action("find-ok"); } }
+                    HorizontalLayout {
+                        alignment: end;
+                        spacing: 8px;
+                        Button { text: "尋找"; primary: true; clicked => { root.action("find-ok"); } }
+                        Button { text: "清除"; clicked => { root.find-text = ""; root.action("find-ok"); } }
+                        Button { text: "取消"; clicked => { root.action("dialog-close"); } }
+                    }
+                }
+                if root.dialog == "password": VerticalLayout {
+                    spacing: 8px;
+                    Text { text: "壓縮檔密碼（用於開啟、解壓縮與測試）："; }
+                    LineEdit { input-type: password; text <=> root.archive-password; accepted => { root.action("password-ok"); } }
+                    HorizontalLayout {
+                        alignment: end;
+                        spacing: 8px;
+                        Button { text: "確定"; primary: true; clicked => { root.action("password-ok"); } }
+                        Button { text: "取消"; clicked => { root.action("dialog-close"); } }
+                    }
+                }
+            }
+        }
+    }
+}
