@@ -13,8 +13,15 @@ if (-not (Test-Path $iscc)) { throw "ISCC.exe not found at $iscc" }
 
 $isl = 'installer\ChineseTraditional.isl'
 if (-not (Test-Path $isl)) {
-    Invoke-WebRequest -UseBasicParsing -OutFile $isl `
-        'https://raw.githubusercontent.com/jrsoftware/issrc/main/Files/Languages/Unofficial/ChineseTraditional.isl'
+    # Newer Inno Setup ships ChineseTraditional.isl officially; older ones need the
+    # unofficial translation from the issrc repo (pinned to a 6.x tag).
+    $bundled = Join-Path (Split-Path $iscc) 'Languages\ChineseTraditional.isl'
+    if (Test-Path $bundled) {
+        Copy-Item $bundled $isl
+    } else {
+        Invoke-WebRequest -UseBasicParsing -OutFile $isl `
+            'https://raw.githubusercontent.com/jrsoftware/issrc/is-6_4_3/Files/Languages/Unofficial/ChineseTraditional.isl'
+    }
 }
 
 $m = Select-String -Path 'gui\Cargo.toml' -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1
