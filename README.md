@@ -81,9 +81,24 @@ archiver --compress <檔案/資料夾...>     開啟建立壓縮檔視窗並預�
 
 到 [Releases](https://github.com/stevenke1981/archiver/releases) 下載對應平台的檔案：
 
-- Windows：`archiver-windows-x64.zip`
+- Windows：**安裝程式 `archiver-setup-windows-x64.exe`**（建議）或免安裝版 `archiver-windows-x64.zip`
+
 - Linux：`archiver-linux-x64.tar.gz`（需 GTK3 執行環境供檔案對話框使用）
 - macOS：`archiver-macos-universal-app.zip`（`Archiver.app`，Apple Silicon + Intel 通用版，宣告了壓縮檔文件類型，可用「打開檔案的應用程式」）；`archiver-macos-universal.tar.gz` 為單純執行檔。未經公證，首次開啟請按右鍵 → 打開，或在「系統設定 → 隱私權與安全性」允許
+
+### Windows 安裝程式（v0.5.1 起）
+
+以 Inno Setup 製作，介面支援繁體中文與英文：
+
+- 預設安裝到 `Program Files\Archiver`（需系統管理員）；也可在對話框選「只為我安裝」，不需管理員權限，安裝到 `%LOCALAPPDATA%\Programs\Archiver`
+- 開始功能表捷徑，可選桌面圖示
+- 可選：將 zip、7z、rar、tar、gz、tgz、bz2、xz、zst 等加入「開啟檔案」清單（檔案關聯）
+- 可選：加入檔案總管右鍵選單（安裝後執行 `archiver.exe --register-shell`）
+- 可選（預設不勾）：把 `rarc` 加入 PATH
+- 升級時直接覆蓋舊版，並自動關閉執行中的 Archiver；解除安裝會移除右鍵選單、檔案關聯與 PATH 設定
+- 靜默安裝：`archiver-setup-windows-x64.exe /VERYSILENT /SUPPRESSMSGBOXES /CURRENTUSER /TASKS=assoc,contextmenu`
+
+自行建置安裝程式：`cargo build --release` 後執行 `pwsh scripts/build-installer.ps1`（需 Inno Setup 6，腳本在 `installer/archiver.iss`）。
 
 ## 從原始碼建置
 
@@ -146,4 +161,6 @@ A small CLI (`rarc`) is included.
 Windows Explorer cascading "Archiver" submenu via HKCU registry (Open / Extract here / Extract to folder\ / Add to archive… for archives; Add to archive… for other files and folders);
 Linux `.desktop` MIME associations plus Nautilus scripts, Dolphin service menus and Nemo actions;
 macOS Finder Quick Actions in `~/Library/Services`. The app accepts `--open`, `--extract-here`, `--extract-to-folder` and `--compress` with multiple files.
-The macOS release ships a universal (arm64 + x86_64) `Archiver.app` with archive document types declared. Limitations: Windows launches one process per selected file; macOS "Open With" launches the app but the file is not loaded (Apple Events are not exposed by eframe) — use the Quick Actions or drag-and-drop. Prebuilt binaries are on the Releases page. Licensed under MIT.
+The macOS release ships a universal (arm64 + x86_64) `Archiver.app` with archive document types declared. Limitations: Windows launches one process per selected file; macOS "Open With" launches the app but the file is not loaded (Apple Events are not exposed by eframe) — use the Quick Actions or drag-and-drop. Prebuilt binaries are on the Releases page.
+
+**Windows installer (v0.5.1):** `archiver-setup-windows-x64.exe` (Inno Setup, Traditional Chinese / English UI). Installs `archiver.exe` and `rarc.exe` to `Program Files\Archiver`, or per-user without admin (`%LOCALAPPDATA%\Programs\Archiver`, chosen in a dialog or with `/CURRENTUSER`). Start-menu shortcut, optional desktop icon, optional "Open with" associations for zip/7z/rar/tar/gz/tgz/bz2/xz/zst…, optional Explorer context menu (runs `--register-shell`), optional `rarc` on PATH (off by default). Upgrades in place and closes a running Archiver; the uninstaller removes the context menu, associations and PATH entry. The executables now carry the app icon. Build it yourself with `pwsh scripts/build-installer.ps1` after `cargo build --release`. Licensed under MIT.

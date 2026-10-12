@@ -63,6 +63,23 @@ jobs:
           esac
           $B --unregister-shell
           if [ "$RUNNER_OS" = "Windows" ]; then ! reg query 'HKCU\Software\Classes\Directory\shell\Archiver' 2>/dev/null; fi
+      - name: Build Windows installer (Inno Setup)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/build-installer.ps1
+      - name: Installer smoke test (silent install / verify / uninstall)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/installer-smoke.ps1
+      - name: Show installer logs
+        if: runner.os == 'Windows' && always()
+        shell: pwsh
+        run: if (Test-Path install.log) { Get-Content install.log -Tail 80 }
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Windows'
+        with:
+          name: archiver-setup-windows-x64
+          path: dist/archiver-setup-windows-x64.exe
       - name: Validate app Info.plist
         if: runner.os == 'macOS'
         run: plutil -lint scripts/Info.plist
