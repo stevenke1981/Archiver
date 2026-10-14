@@ -71,7 +71,20 @@ struct State {
 
 type S = Rc<RefCell<State>>;
 
+/// On Windows prefer the Skia renderer: the software renderer's partial presentation
+/// can leave regions of the window unpainted (desktop shows through).
+fn select_renderer() {
+    #[cfg(windows)]
+    if std::env::var_os("SLINT_BACKEND").is_none() {
+        let skia = slint::BackendSelector::new().backend_name("winit".into()).renderer_name("skia".into()).select();
+        if skia.is_err() {
+            let _ = slint::BackendSelector::new().backend_name("winit".into()).renderer_name("software".into()).select();
+        }
+    }
+}
+
 fn main() -> Result<(), slint::PlatformError> {
+    select_renderer();
     let action = match args::parse(std::env::args_os().skip(1)) {
         Ok(a) => a,
         Err(e) => {

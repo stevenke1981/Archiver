@@ -1,6 +1,6 @@
 [package]
 name = "archiver"
-version = "0.5.1"
+version = "0.5.2"
 edition = "2024"
 
 [dependencies]
@@ -10,7 +10,10 @@ rfd = { version = "0.17.2", default-features = false, features = ["gtk3"] }
 slint = { version = "1.18.1", default-features = false, features = ["std", "compat-1-2", "backend-winit", "renderer-software", "software-renderer-systemfonts", "unstable-winit-030"] }
 chrono = "0.4.45"
 
+# Windows: the software renderer's partial (damage-region) presentation via softbuffer
+# leaves parts of the window unpainted/transparent on some systems, so use Skia there.
 [target.'cfg(windows)'.dependencies]
+slint = { version = "1.18.1", default-features = false, features = ["renderer-skia"] }
 winreg = "0.55"
 
 [dev-dependencies]

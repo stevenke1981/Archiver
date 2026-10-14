@@ -63,6 +63,15 @@ jobs:
           esac
           $B --unregister-shell
           if [ "$RUNNER_OS" = "Windows" ]; then ! reg query 'HKCU\Software\Classes\Directory\shell\Archiver' 2>/dev/null; fi
+      - name: GUI screenshot (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/win-screenshot.ps1 -Exe target\release\archiver.exe
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Windows' && always()
+        with:
+          name: windows-gui-screenshot
+          path: win-screenshot.png
       - name: Build Windows installer (Inno Setup)
         if: runner.os == 'Windows'
         shell: pwsh
