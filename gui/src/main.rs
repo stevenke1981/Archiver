@@ -73,18 +73,16 @@ type S = Rc<RefCell<State>>;
 
 /// On Windows prefer the Skia renderer: the software renderer's partial presentation
 /// can leave regions of the window unpainted (desktop shows through).
-fn select_renderer() {
+fn select_renderer() -> Result<(), slint::PlatformError> {
+    let sel = || slint::BackendSelector::new().backend_name("winit".into());
     #[cfg(windows)]
-    if std::env::var_os("SLINT_BACKEND").is_none() {
-        let skia = slint::BackendSelector::new().backend_name("winit".into()).renderer_name("skia".into()).select();
-        if skia.is_err() {
-            let _ = slint::BackendSelector::new().backend_name("winit".into()).renderer_name("software".into()).select();
-        }
+    if std::env::var_os("SLINT_BACKEND").is_none() && sel().renderer_name("skia".into()).select().is_ok() {
+        return Ok(());
     }
+    sel().select()
 }
 
 fn main() -> Result<(), slint::PlatformError> {
-    select_renderer();
     let action = match args::parse(std::env::args_os().skip(1)) {
         Ok(a) => a,
         Err(e) => {
@@ -113,7 +111,7 @@ fn main() -> Result<(), slint::PlatformError> {
         _ => {}
     }
 
-    slint::BackendSelector::new().backend_name("winit".into()).select()?;
+    select_renderer()?;
     let ui = AppWindow::new()?;
     let start_dir = std::env::current_dir().ok().filter(|d| d.is_dir()).or_else(home_dir).unwrap_or_else(|| PathBuf::from("/"));
     let st: S = Rc::new(RefCell::new(State {
