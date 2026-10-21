@@ -16,12 +16,13 @@ component ToolButton inherits Rectangle {
     in property <image> icon;
     in property <string> label;
     in property <bool> enabled: true;
+    in property <bool> checked: false;
     callback clicked;
     width: 54px;
     height: 56px;
     border-radius: 3px;
-    background: ta.has-hover && root.enabled ? (ta.pressed ? #cce4f7 : #e5f1fb) : transparent;
-    border-width: ta.has-hover && root.enabled ? 1px : 0px;
+    background: ta.has-hover && root.enabled ? (ta.pressed ? #cce4f7 : #e5f1fb) : root.checked ? #cce4f7 : transparent;
+    border-width: (ta.has-hover && root.enabled) || root.checked ? 1px : 0px;
     border-color: #99c9ef;
     VerticalLayout {
         padding: 3px;
@@ -126,6 +127,16 @@ export component AppWindow inherits Window {
     in property <string> shell-description;
     in-out property <string> find-text;
     in-out property <string> archive-password;
+    in-out property <bool> create-each: false;
+
+    // preview pane; mode: "none", "loading", "text", "hex", "image", "folder", "info", "error"
+    in-out property <bool> preview-visible: true;
+    in property <string> preview-mode: "none";
+    in property <string> preview-title;
+    in property <string> preview-meta;
+    in property <string> preview-text;
+    in property <image> preview-image;
+    in property <string> mono-font: "monospace";
 
     callback action(string);
     callback row-clicked(int, bool, bool);
@@ -140,6 +151,16 @@ export component AppWindow inherits Window {
     property <length> w-kind: 130px;
     property <length> w-date: 140px;
     property <length> w-crc: 80px;
+    property <length> row-height: 20px;
+
+    /// Scroll the file list so that row `i` is visible.
+    public function ensure-row-visible(i: int) {
+        if (i * root.row-height < -lv.content-y) {
+            lv.content-y = -(i * root.row-height);
+        } else if ((i + 1) * root.row-height > -lv.content-y + lv.visible-height) {
+            lv.content-y = -((i + 1) * root.row-height - lv.visible-height);
+        }
+    }
 
     MenuBar {
         Menu {
@@ -155,15 +176,22 @@ export component AppWindow inherits Window {
         Menu {
             title: "指令(C)";
             MenuItem { title: "加入檔案到壓縮檔"; activated => { root.action("add"); } }
+            MenuItem { title: "分批壓縮（各自建立壓縮檔）…"; activated => { root.action("add-each"); } }
+            MenuSeparator { }
             MenuItem { title: "解壓縮到指定資料夾"; activated => { root.action("extract"); } }
+            MenuItem { title: "解壓縮到這裡"; activated => { root.action("extract-here"); } }
+            MenuItem { title: "分別解壓縮到各自資料夾"; activated => { root.action("extract-each"); } }
+            MenuSeparator { }
             MenuItem { title: "測試壓縮檔"; activated => { root.action("test"); } }
-            MenuItem { title: "檢視檔案"; activated => { root.action("view"); } }
+            MenuItem { title: "檢視檔案 (F3)"; activated => { root.action("view"); } }
+            MenuItem { title: "複製到剪貼簿 (Ctrl+C)"; activated => { root.action("copy"); } }
             MenuItem { title: "刪除檔案"; enabled: root.can-delete; activated => { root.action("delete"); } }
         }
         Menu {
             title: "工具(S)";
             MenuItem { title: "精靈"; activated => { root.action("wizard"); } }
-            MenuItem { title: "尋找檔案"; activated => { root.action("find"); } }
+            MenuItem { title: "尋找檔案 (Ctrl+F)"; activated => { root.action("find"); } }
+            MenuItem { title: "重新整理 (F5)"; activated => { root.action("refresh"); } }
             MenuItem { title: "顯示資訊"; activated => { root.action("info"); } }
         }
         Menu {
@@ -172,6 +200,7 @@ export component AppWindow inherits Window {
         }
         Menu {
             title: "選項(N)";
+            MenuItem { title: "預覽窗格"; checkable: true; checked <=> root.preview-visible; activated => { root.action("preview-changed"); } }
             MenuItem { title: "右鍵選單整合…"; activated => { root.action("shell"); } }
         }
         Menu {
@@ -196,10 +225,20 @@ export component AppWindow inherits Window {
                 ToolButton { icon: @image-url("icons/extract.svg"); label: "解壓縮到"; clicked => { root.action("extract"); } }
                 ToolButton { icon: @image-url("icons/test.svg"); label: "測試"; clicked => { root.action("test"); } }
                 ToolButton { icon: @image-url("icons/view.svg"); label: "檢視"; clicked => { root.action("view"); } }
+                ToolButton { icon: @image-url("icons/copy.svg"); label: "複製"; clicked => { root.action("copy"); } }
                 ToolButton { icon: @image-url("icons/delete.svg"); label: "刪除"; enabled: root.can-delete; clicked => { root.action("delete"); } }
                 ToolButton { icon: @image-url("icons/find.svg"); label: "尋找"; clicked => { root.action("find"); } }
                 ToolButton { icon: @image-url("icons/wizard.svg"); label: "精靈"; clicked => { root.action("wizard"); } }
                 ToolButton { icon: @image-url("icons/info.svg"); label: "資訊"; clicked => { root.action("info"); } }
+                ToolButton {
+                    icon: @image-url("icons/preview.svg");
+                    label: "預覽";
+                    checked: root.preview-visible;
+                    clicked => {
+                        root.preview-visible = !root.preview-visible;
+                        root.action("preview-changed");
+                    }
+                }
                 Rectangle { width: 9px; Rectangle { x: 4px; width: 1px; height: 46px; background: #d0d0d0; } }
                 ToolButton { icon: @image-url("icons/antivirus.svg"); label: "防毒"; enabled: false; }
                 ToolButton { icon: @image-url("icons/comment.svg"); label: "註解"; enabled: false; }
@@ -236,68 +275,162 @@ export component AppWindow inherits Window {
                 }
             }
         }
-        // header
-        Rectangle {
-            height: 22px;
-            background: #ffffff;
-            HorizontalLayout {
-                HeaderCell { text: "名稱"; column: 0; sort-column: root.sort-column; sort-ascending: root.sort-ascending; sort(c) => { root.sort(c); } }
-                HeaderCell { width: root.w-size; text: "大小"; align-right: true; column: 1; sort-column: root.sort-column; sort-ascending: root.sort-ascending; sort(c) => { root.sort(c); } }
-                HeaderCell { width: root.w-packed; text: "封裝後"; align-right: true; column: 2; sort-column: root.sort-column; sort-ascending: root.sort-ascending; sort(c) => { root.sort(c); } }
-                HeaderCell { width: root.w-kind; text: "類型"; column: 3; sort-column: root.sort-column; sort-ascending: root.sort-ascending; sort(c) => { root.sort(c); } }
-                HeaderCell { width: root.w-date; text: "修改日期"; column: 4; sort-column: root.sort-column; sort-ascending: root.sort-ascending; sort(c) => { root.sort(c); } }
-                HeaderCell { width: root.w-crc; text: "CRC32"; column: 5; sort-column: root.sort-column; sort-ascending: root.sort-ascending; sort(c) => { root.sort(c); } }
-            }
-        }
-        // file list
-        fs := FocusScope {
+        HorizontalLayout {
             vertical-stretch: 1;
-            key-pressed(event) => {
-                if (event.text == Key.Return) { root.key("enter"); return accept; }
-                if (event.text == Key.Backspace) { root.key("up"); return accept; }
-                if (event.text == Key.Delete) { root.key("delete"); return accept; }
-                if (event.modifiers.control && (event.text == "a" || event.text == "A")) { root.action("select-all"); return accept; }
-                reject
-            }
-            ListView {
-                for row[i] in root.rows: Rectangle {
-                    height: 20px;
-                    background: row.selected ? #cce8ff : (rta.has-hover ? #e5f3ff : transparent);
+            spacing: 0;
+            VerticalLayout {
+                spacing: 0;
+                // header
+                Rectangle {
+                    height: 22px;
+                    background: #ffffff;
                     HorizontalLayout {
-                        padding-left: 4px;
-                        HorizontalLayout {
-                            spacing: 4px;
-                            Image {
-                                width: 16px;
-                                height: 16px;
-                                y: 2px;
-                                source: row.icon <= 1 ? @image-url("icons/folder.svg")
-                                    : row.icon == 3 ? @image-url("icons/archive.svg")
-                                    : row.icon == 4 ? @image-url("icons/exe.svg")
-                                    : row.icon == 5 ? @image-url("icons/text.svg")
-                                    : row.icon == 6 ? @image-url("icons/image.svg")
-                                    : @image-url("icons/file.svg");
-                            }
-                            Text { text: row.name; vertical-alignment: center; overflow: elide; }
-                        }
-                        Text { width: root.w-size - 6px; text: row.size; horizontal-alignment: right; vertical-alignment: center; }
-                        Rectangle { width: 6px; }
-                        Text { width: root.w-packed - 6px; text: row.packed; horizontal-alignment: right; vertical-alignment: center; }
-                        Rectangle { width: 12px; }
-                        Text { width: root.w-kind - 6px; text: row.kind; vertical-alignment: center; overflow: elide; }
-                        Rectangle { width: 6px; }
-                        Text { width: root.w-date - 6px; text: row.modified; vertical-alignment: center; overflow: elide; }
-                        Rectangle { width: 6px; }
-                        Text { width: root.w-crc - 6px; text: row.crc; vertical-alignment: center; }
+                        HeaderCell { text: "名稱"; column: 0; sort-column: root.sort-column; sort-ascending: root.sort-ascending; sort(c) => { root.sort(c); } }
+                        HeaderCell { width: root.w-size; text: "大小"; align-right: true; column: 1; sort-column: root.sort-column; sort-ascending: root.sort-ascending; sort(c) => { root.sort(c); } }
+                        HeaderCell { width: root.w-packed; text: "封裝後"; align-right: true; column: 2; sort-column: root.sort-column; sort-ascending: root.sort-ascending; sort(c) => { root.sort(c); } }
+                        HeaderCell { width: root.w-kind; text: "類型"; column: 3; sort-column: root.sort-column; sort-ascending: root.sort-ascending; sort(c) => { root.sort(c); } }
+                        HeaderCell { width: root.w-date; text: "修改日期"; column: 4; sort-column: root.sort-column; sort-ascending: root.sort-ascending; sort(c) => { root.sort(c); } }
+                        HeaderCell { width: root.w-crc; text: "CRC32"; column: 5; sort-column: root.sort-column; sort-ascending: root.sort-ascending; sort(c) => { root.sort(c); } }
                     }
-                    rta := TouchArea {
-                        pointer-event(ev) => {
-                            if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.left) {
-                                fs.focus();
-                                root.row-clicked(i, ev.modifiers.control || ev.modifiers.meta, ev.modifiers.shift);
+                }
+                // file list
+                fs := FocusScope {
+                    vertical-stretch: 1;
+                    key-pressed(event) => {
+                        if (event.text == Key.Return) { root.key("enter"); return accept; }
+                        if (event.text == Key.Backspace) { root.key("up"); return accept; }
+                        if (event.text == Key.Delete) { root.key("delete"); return accept; }
+                        if (event.text == Key.UpArrow) { root.key("prev"); return accept; }
+                        if (event.text == Key.DownArrow) { root.key("next"); return accept; }
+                        if (event.text == Key.F5) { root.action("refresh"); return accept; }
+                        if (event.text == Key.F3) { root.action("view"); return accept; }
+                        if (event.modifiers.control && (event.text == "a" || event.text == "A")) { root.action("select-all"); return accept; }
+                        if (event.modifiers.control && (event.text == "c" || event.text == "C")) { root.action("copy"); return accept; }
+                        if (event.modifiers.control && (event.text == "f" || event.text == "F")) { root.action("find"); return accept; }
+                        reject
+                    }
+                    lv := ListView {
+                        for row[i] in root.rows: Rectangle {
+                            height: root.row-height;
+                            background: row.selected ? #cce8ff : (rta.has-hover ? #e5f3ff : transparent);
+                            HorizontalLayout {
+                                padding-left: 4px;
+                                HorizontalLayout {
+                                    spacing: 4px;
+                                    Image {
+                                        width: 16px;
+                                        height: 16px;
+                                        y: 2px;
+                                        source: row.icon <= 1 ? @image-url("icons/folder.svg")
+                                            : row.icon == 3 ? @image-url("icons/archive.svg")
+                                            : row.icon == 4 ? @image-url("icons/exe.svg")
+                                            : row.icon == 5 ? @image-url("icons/text.svg")
+                                            : row.icon == 6 ? @image-url("icons/image.svg")
+                                            : @image-url("icons/file.svg");
+                                    }
+                                    Text { text: row.name; vertical-alignment: center; overflow: elide; }
+                                }
+                                Text { width: root.w-size - 6px; text: row.size; horizontal-alignment: right; vertical-alignment: center; }
+                                Rectangle { width: 6px; }
+                                Text { width: root.w-packed - 6px; text: row.packed; horizontal-alignment: right; vertical-alignment: center; }
+                                Rectangle { width: 12px; }
+                                Text { width: root.w-kind - 6px; text: row.kind; vertical-alignment: center; overflow: elide; }
+                                Rectangle { width: 6px; }
+                                Text { width: root.w-date - 6px; text: row.modified; vertical-alignment: center; overflow: elide; }
+                                Rectangle { width: 6px; }
+                                Text { width: root.w-crc - 6px; text: row.crc; vertical-alignment: center; }
+                            }
+                            rta := TouchArea {
+                                pointer-event(ev) => {
+                                    if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.left) {
+                                        fs.focus();
+                                        root.row-clicked(i, ev.modifiers.control || ev.modifiers.meta, ev.modifiers.shift);
+                                    }
+                                }
+                                double-clicked => { root.row-double-clicked(i); }
                             }
                         }
-                        double-clicked => { root.row-double-clicked(i); }
+                    }
+                }
+            }
+            if root.preview-visible: Rectangle { width: 1px; background: #d9d9d9; }
+            // preview pane
+            if root.preview-visible: Rectangle {
+                width: 300px;
+                background: #f9f9f9;
+                VerticalLayout {
+                    padding: 8px;
+                    spacing: 6px;
+                    Text { text: root.preview-title == "" ? "預覽" : root.preview-title; font-weight: 700; overflow: elide; }
+                    if root.preview-meta != "": Text { text: root.preview-meta; color: #606060; wrap: word-wrap; }
+                    Rectangle {
+                        vertical-stretch: 1;
+                        background: #ffffff;
+                        border-width: 1px;
+                        border-color: #d9d9d9;
+                        clip: true;
+                        if root.preview-mode == "none" || root.preview-mode == "loading": Text {
+                            width: parent.width;
+                            height: parent.height;
+                            text: root.preview-mode == "loading" ? "載入中…" : "選取檔案即可預覽";
+                            color: #909090;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        if root.preview-mode == "text": tsv := ScrollView {
+                            x: 1px;
+                            y: 1px;
+                            width: parent.width - 2px;
+                            height: parent.height - 2px;
+                            content-width: self.visible-width;
+                            content-height: tt.preferred-height + 8px;
+                            tt := Text {
+                                x: 4px;
+                                y: 4px;
+                                width: tsv.visible-width - 8px;
+                                text: root.preview-text;
+                                wrap: word-wrap;
+                            }
+                        }
+                        if root.preview-mode == "hex": hsv := ScrollView {
+                            x: 1px;
+                            y: 1px;
+                            width: parent.width - 2px;
+                            height: parent.height - 2px;
+                            content-width: max(self.visible-width, ht.preferred-width + 8px);
+                            content-height: ht.preferred-height + 8px;
+                            ht := Text {
+                                x: 4px;
+                                y: 4px;
+                                text: root.preview-text;
+                                font-family: root.mono-font;
+                                font-size: 11px;
+                            }
+                        }
+                        if root.preview-mode == "image": Image {
+                            x: 4px;
+                            y: 4px;
+                            width: parent.width - 8px;
+                            height: parent.height - 8px;
+                            source: root.preview-image;
+                            image-fit: contain;
+                        }
+                        if root.preview-mode == "folder" || root.preview-mode == "info" || root.preview-mode == "error": Text {
+                            x: 8px;
+                            y: 8px;
+                            width: parent.width - 16px;
+                            height: parent.height - 16px;
+                            text: root.preview-text;
+                            wrap: word-wrap;
+                            vertical-alignment: top;
+                            color: root.preview-mode == "error" ? #c42b1c : #202020;
+                        }
+                    }
+                    HorizontalLayout {
+                        spacing: 6px;
+                        Button { text: "複製檔案"; enabled: root.preview-mode != "none"; clicked => { root.action("copy"); } }
+                        Button { text: "複製文字"; enabled: root.preview-mode == "text" || root.preview-mode == "hex"; clicked => { root.action("copy-text"); } }
+                        Button { text: "開啟"; enabled: root.preview-mode != "none" && root.preview-mode != "folder" && root.preview-mode != "info"; clicked => { root.action("view"); } }
                     }
                 }
             }
@@ -345,7 +478,7 @@ export component AppWindow inherits Window {
                 Text {
                     font-size: 15px;
                     font-weight: 600;
-                    text: root.dialog == "create" ? "建立壓縮檔"
+                    text: root.dialog == "create" ? (root.create-each ? "分批壓縮" : "建立壓縮檔")
                         : root.dialog == "info" ? "壓縮檔資訊"
                         : root.dialog == "shell" ? "右鍵選單整合"
                         : root.dialog == "password" ? "輸入密碼"
@@ -363,9 +496,14 @@ export component AppWindow inherits Window {
                             Text { x: 4px; y: 2px; text: root.create-sources; }
                         }
                     }
+                    CheckBox {
+                        text: "每個檔案／資料夾分別建立壓縮檔（分批壓縮）";
+                        checked <=> root.create-each;
+                        toggled => { root.action("create-each-changed"); }
+                    }
                     HorizontalLayout {
                         spacing: 8px;
-                        Text { text: "格式："; vertical-alignment: center; width: 70px; }
+                        Text { text: "格式："; vertical-alignment: center; width: 80px; }
                         ComboBox {
                             model: root.formats;
                             current-index <=> root.format-index;
@@ -374,7 +512,7 @@ export component AppWindow inherits Window {
                     }
                     HorizontalLayout {
                         spacing: 8px;
-                        Text { text: "壓縮等級："; vertical-alignment: center; width: 70px; }
+                        Text { text: "壓縮等級："; vertical-alignment: center; width: 80px; }
                         Slider {
                             enabled: root.level-enabled;
                             minimum: root.level-min;
@@ -386,7 +524,7 @@ export component AppWindow inherits Window {
                     }
                     HorizontalLayout {
                         spacing: 8px;
-                        Text { text: "密碼："; vertical-alignment: center; width: 70px; }
+                        Text { text: "密碼："; vertical-alignment: center; width: 80px; }
                         LineEdit {
                             enabled: root.password-enabled;
                             input-type: password;
@@ -397,7 +535,7 @@ export component AppWindow inherits Window {
                     if root.single-file-warning: Text { text: "⚠ 此格式只能壓縮單一檔案，多個檔案請用 TAR.* 格式"; color: #b9770e; }
                     HorizontalLayout {
                         spacing: 8px;
-                        Text { text: "輸出："; vertical-alignment: center; width: 70px; }
+                        Text { text: root.create-each ? "輸出資料夾：" : "輸出："; vertical-alignment: center; width: 80px; }
                         LineEdit { text <=> root.create-output; }
                         Button { text: "瀏覽…"; clicked => { root.action("create-browse"); } }
                     }

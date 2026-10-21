@@ -2,29 +2,33 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod args;
+mod clipboard;
+mod preview;
 mod shell;
 mod view;
 
 use std::cell::RefCell;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, channel};
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use archiver_core::{CreateOptions, Entry, Format, Progress};
+use archiver_core::{BatchDest, BatchResult, CreateOptions, Entry, Format, Progress};
 use args::Action;
+use preview::{ImageKind, Preview};
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 use view::Item;
 
 slint::include_modules!();
 
-/// Destination for "extract here" / "extract to folder".
-pub fn extract_dest(archive: &Path, to_folder: bool) -> PathBuf {
-    let dir = archive.parent().map(Path::to_path_buf).unwrap_or_default();
-    if to_folder { dir.join(archiver_core::archive_stem(archive)) } else { dir }
-}
+const BUSY_MSG: &str = "目前有工作正在進行，請稍候…";
+const PREVIEW_PW_MSG: &str = "此檔案已加密，請先輸入壓縮檔密碼（檔案 → 壓縮檔密碼…）";
+/// Bytes shown as hex when an image cannot be decoded.
+const HEX_FALLBACK: usize = 16 << 10;
+const PREVIEW_DEBOUNCE: Duration = Duration::from_millis(120);
 
 enum Mode {
     Fs(PathBuf),
@@ -38,6 +42,11 @@ enum After {
     ReloadArchive,
     OpenFile(PathBuf),
     Message,
+    /// Put these (extracted) files on the clipboard.
+    CopyFiles(Vec<PathBuf>),
+    /// Batch create/extract finished; the message is [`batch_summary`]. `retry`: the single
+    /// archive that failed because of a password (opened instead when started from the CLI).
+    Batch { failed: usize, retry: Option<PathBuf> },
 }
 
 enum Msg {
@@ -50,6 +59,40 @@ struct Job {
     cancel: Arc<AtomicBool>,
     progress: Arc<Mutex<(u64, u64, String)>>,
     title: String,
+}
+
+/// What the preview worker produced.
+enum PvBody {
+    Text(String),
+    Hex(String),
+    /// Temp file holding the image, hex fallback.
+    Raster(PathBuf, String),
+    /// SVG data, hex fallback.
+    Svg(Vec<u8>, String),
+    Empty,
+    Error(String),
+}
+
+struct PreviewDone {
+    generation: u64,
+    body: PvBody,
+    /// Complete bytes of an archive entry: (archive, entry name, bytes).
+    full: Option<(PathBuf, String, Vec<u8>)>,
+}
+
+enum PvSrc {
+    Entry { archive: PathBuf, name: String, password: Option<String> },
+    File(PathBuf),
+}
+
+struct PreviewState {
+    generation: u64,
+    cancel: Arc<AtomicBool>,
+    timer: slint::Timer,
+    tx: Sender<PreviewDone>,
+    rx: Receiver<PreviewDone>,
+    /// Last fully read archive entry, for the quick copy path.
+    cache: Option<(PathBuf, String, Vec<u8>)>,
 }
 
 struct State {
@@ -67,6 +110,10 @@ struct State {
     fallback_open: Option<PathBuf>,
     drops: Vec<PathBuf>,
     status: String,
+    clip: clipboard::Clip,
+    /// Staging folder of the files currently on the clipboard (removed when replaced).
+    last_clip: Option<PathBuf>,
+    pv: PreviewState,
 }
 
 type S = Rc<RefCell<State>>;
@@ -114,6 +161,8 @@ fn main() -> Result<(), slint::PlatformError> {
     select_renderer()?;
     let ui = AppWindow::new()?;
     let start_dir = std::env::current_dir().ok().filter(|d| d.is_dir()).or_else(home_dir).unwrap_or_else(|| PathBuf::from("/"));
+    std::thread::spawn(|| view::purge_old_clips(Duration::from_secs(24 * 3600)));
+    let (pv_tx, pv_rx) = channel();
     let st: S = Rc::new(RefCell::new(State {
         mode: Mode::Fs(start_dir),
         items: vec![],
@@ -129,7 +178,11 @@ fn main() -> Result<(), slint::PlatformError> {
         fallback_open: None,
         drops: vec![],
         status: String::new(),
+        clip: clipboard::Clip::new(),
+        last_clip: None,
+        pv: PreviewState { generation: 0, cancel: Arc::new(AtomicBool::new(false)), timer: slint::Timer::default(), tx: pv_tx, rx: pv_rx, cache: None },
     }));
+    ui.set_mono_font(if cfg!(windows) { "Consolas" } else if cfg!(target_os = "macos") { "Menlo" } else { "monospace" }.into());
     let formats: Vec<SharedString> = Format::writable().iter().map(|f| f.label().into()).collect();
     ui.set_formats(ModelRc::new(VecModel::from(formats)));
 
@@ -150,7 +203,7 @@ fn main() -> Result<(), slint::PlatformError> {
     refresh(&ui, &st);
     match action {
         Action::Open(p) => open_archive(&ui, &st, p),
-        Action::Compress(files) => open_create(&ui, &st, files),
+        Action::Compress(files) => open_create(&ui, &st, files, None),
         Action::ExtractHere(files) => extract_batch(&ui, &st, files, false),
         Action::ExtractToFolder(files) => extract_batch(&ui, &st, files, true),
         _ => {}
@@ -215,6 +268,7 @@ fn refresh(ui: &AppWindow, st: &S) {
     ui.set_sort_ascending(s.sort_asc);
     drop(s);
     push_rows(ui, st);
+    selection_changed(ui, st);
 }
 
 fn push_rows(ui: &AppWindow, st: &S) {
@@ -269,13 +323,49 @@ fn selected_items(st: &State) -> Vec<Item> {
     st.items.iter().zip(&st.selected).filter(|(i, x)| **x && !i.is_parent).map(|(i, _)| i.clone()).collect()
 }
 
+/// Update only the selection flags in the existing row model.
+fn sync_selection(ui: &AppWindow, st: &S) {
+    let rows = ui.get_rows();
+    let s = st.borrow();
+    for (k, &sel) in s.selected.iter().enumerate() {
+        if let Some(mut r) = rows.row_data(k)
+            && r.selected != sel
+        {
+            r.selected = sel;
+            rows.set_row_data(k, r);
+        }
+    }
+    update_status(ui, &s);
+}
+
+/// Up/Down arrow: move a single selection by `delta` rows.
+fn move_selection(ui: &AppWindow, st: &S, delta: i32) {
+    let next = {
+        let mut s = st.borrow_mut();
+        let n = s.items.len();
+        if n == 0 {
+            return;
+        }
+        let cur = s.anchor.or_else(|| s.selected.iter().position(|&x| x));
+        let next = cur.map_or(0, |c| (c as i64 + delta as i64).clamp(0, n as i64 - 1) as usize);
+        s.selected.iter_mut().for_each(|x| *x = false);
+        s.selected[next] = true;
+        s.anchor = Some(next);
+        s.status.clear();
+        next
+    };
+    sync_selection(ui, st);
+    ui.invoke_ensure_row_visible(next as i32);
+    selection_changed(ui, st);
+}
+
 // ------------------------------------------------------------------ background jobs
 
 fn spawn<F>(ui: &AppWindow, st: &S, title: &str, f: F)
 where
     F: FnOnce(&Progress) -> Msg + Send + 'static,
 {
-    if st.borrow().job.is_some() {
+    if is_busy(ui, st) {
         return;
     }
     let (tx, rx) = channel();
@@ -297,7 +387,17 @@ where
     ui.set_progress_text(title.into());
 }
 
+/// True (and a status hint) while a background job runs.
+fn is_busy(ui: &AppWindow, st: &S) -> bool {
+    let busy = st.borrow().job.is_some();
+    if busy {
+        set_status(ui, st, BUSY_MSG);
+    }
+    busy
+}
+
 fn poll(ui: &AppWindow, st: &S) {
+    poll_preview(ui, st);
     let drops = std::mem::take(&mut st.borrow_mut().drops);
     if !drops.is_empty() {
         handle_drops(ui, st, drops);
@@ -320,9 +420,17 @@ fn poll(ui: &AppWindow, st: &S) {
             let fmt = Format::detect(&path).unwrap_or(Format::Zip);
             {
                 let mut s = st.borrow_mut();
-                s.mode = Mode::Archive { path, fmt, entries, prefix: String::new() };
-                s.filter.clear();
-                s.status.clear();
+                // re-listing the open archive (F5, after delete) keeps the folder and status
+                let prefix = match &s.mode {
+                    Mode::Archive { path: p, prefix, .. } if *p == path => Some(prefix.clone()),
+                    _ => None,
+                };
+                if prefix.is_none() {
+                    s.filter.clear();
+                    s.status.clear();
+                }
+                s.mode = Mode::Archive { path, fmt, entries, prefix: prefix.unwrap_or_default() };
+                s.pv.cache = None;
             }
             refresh(ui, st);
         }
@@ -336,7 +444,8 @@ fn poll(ui: &AppWindow, st: &S) {
         }
         Msg::Done(Ok(text), after) => {
             st.borrow_mut().status = text.clone();
-            if st.borrow().close_when_done {
+            let batch_failed = matches!(after, After::Batch { failed, .. } if failed > 0);
+            if st.borrow().close_when_done && !batch_failed {
                 let _ = ui.hide();
                 let _ = slint::quit_event_loop();
                 return;
@@ -366,6 +475,24 @@ fn poll(ui: &AppWindow, st: &S) {
                     update_status(ui, &st.borrow());
                     info_box("Archiver", &text);
                 }
+                After::CopyFiles(paths) => copy_to_clipboard(ui, st, &paths),
+                After::Batch { failed, retry } => {
+                    let from_cli = {
+                        let mut s = st.borrow_mut();
+                        s.status = text.lines().next().unwrap_or_default().to_string();
+                        std::mem::take(&mut s.close_when_done)
+                    };
+                    if matches!(st.borrow().mode, Mode::Fs(_)) {
+                        refresh(ui, st);
+                    }
+                    update_status(ui, &st.borrow());
+                    match retry.filter(|_| from_cli && failed == 1) {
+                        // e.g. encrypted archive from the context menu: open it so a password can be entered
+                        Some(p) => open_archive(ui, st, p),
+                        None if failed > 0 => error_box(&text),
+                        None => {}
+                    }
+                }
             }
         }
         Msg::Done(Err(e), _) => {
@@ -386,16 +513,12 @@ fn poll(ui: &AppWindow, st: &S) {
 }
 
 fn reload_archive_keep_prefix(ui: &AppWindow, st: &S, path: PathBuf) {
+    // listing can take long (.tar.gz is read in full): in the background, like open_archive
     let pw = opt_pw(&st.borrow());
-    match archiver_core::list(&path, pw.as_deref()) {
-        Ok(entries) => {
-            if let Mode::Archive { entries: e, .. } = &mut st.borrow_mut().mode {
-                *e = entries;
-            }
-            refresh(ui, st);
-        }
-        Err(e) => set_status(ui, st, format!("錯誤：{e}")),
-    }
+    spawn(ui, st, "讀取中…", move |_| {
+        let r = archiver_core::list(&path, pw.as_deref()).map_err(|e| e.to_string());
+        Msg::Listed(path, r)
+    });
 }
 
 // ------------------------------------------------------------------ actions
@@ -412,29 +535,49 @@ fn open_archive(ui: &AppWindow, st: &S, path: PathBuf) {
     });
 }
 
+/// Context-menu "extract here / to folder": extract every archive, continue after failures.
 fn extract_batch(ui: &AppWindow, st: &S, files: Vec<PathBuf>, to_folder: bool) {
-    let jobs: Vec<(PathBuf, PathBuf)> = files.into_iter().map(|f| {
-        let d = extract_dest(&f, to_folder);
-        (f, d)
-    }).collect();
-    {
-        let mut s = st.borrow_mut();
-        if jobs.len() == 1 {
-            s.fallback_open = Some(jobs[0].0.clone());
-        }
-        s.close_when_done = true;
-    }
-    spawn(ui, st, "解壓縮中…", move |p| {
-        for (arc, dest) in &jobs {
-            if let Err(e) = archiver_core::extract(arc, dest, None, None, p) {
-                return Msg::Done(Err(format!("{}: {e}", arc.display())), After::Nothing);
-            }
-        }
-        Msg::Done(Ok("解壓縮完成".into()), After::Nothing)
-    });
+    st.borrow_mut().close_when_done = true;
+    let dest = if to_folder { BatchDest::BesideInFolder } else { BatchDest::Beside };
+    spawn(ui, st, "解壓縮中…", move |p| batch_msg(&archiver_core::extract_each(&files, &dest, None, p)));
 }
 
-fn open_create(ui: &AppWindow, st: &S, files: Vec<PathBuf>) {
+fn is_password_err(e: &str) -> bool {
+    e.to_lowercase().contains("password")
+}
+
+/// "已完成 N 個（成功 X，失敗 Y）" plus one line per failure (at most 20); returns the failure count.
+fn batch_summary(results: &[BatchResult]) -> (String, usize) {
+    const MAX_LINES: usize = 20;
+    let failed: Vec<(&BatchResult, String)> = results.iter().filter_map(|r| r.result.as_ref().err().map(|e| (r, e.to_string()))).collect();
+    let mut text = format!("已完成 {} 個（成功 {}，失敗 {}）", results.len(), results.len() - failed.len(), failed.len());
+    for (r, e) in failed.iter().take(MAX_LINES) {
+        let name = r.input.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| r.input.display().to_string());
+        text.push_str(&format!("\n✗ {name}：{e}"));
+    }
+    if failed.len() > MAX_LINES {
+        text.push_str(&format!("\n…還有 {} 個", failed.len() - MAX_LINES));
+    }
+    (text, failed.len())
+}
+
+/// The input of the only failed item, if it failed because of a missing/wrong password.
+fn single_password_failure(results: &[BatchResult]) -> Option<PathBuf> {
+    let mut failed = results.iter().filter(|r| r.result.is_err());
+    match (failed.next(), failed.next()) {
+        (Some(r), None) if r.result.as_ref().is_err_and(|e| is_password_err(&e.to_string())) => Some(r.input.clone()),
+        _ => None,
+    }
+}
+
+fn batch_msg(results: &[BatchResult]) -> Msg {
+    let (text, failed) = batch_summary(results);
+    Msg::Done(Ok(text), After::Batch { failed, retry: single_password_failure(results) })
+}
+
+/// Open the create dialog with `files` added. `each`: preset the batch checkbox (a fresh
+/// dialog defaults to a single archive).
+fn open_create(ui: &AppWindow, st: &S, files: Vec<PathBuf>, each: Option<bool>) {
     {
         let mut s = st.borrow_mut();
         for f in files {
@@ -445,8 +588,11 @@ fn open_create(ui: &AppWindow, st: &S, files: Vec<PathBuf>) {
     }
     if ui.get_dialog() != "create" {
         ui.set_create_password(SharedString::new());
+        ui.set_create_each(each.unwrap_or(false));
         let idx = ui.get_format_index().max(0) as usize;
         apply_format(ui, st, idx);
+    } else if let Some(e) = each {
+        ui.set_create_each(e);
     }
     update_create_fields(ui, st);
     ui.set_dialog("create".into());
@@ -457,10 +603,20 @@ fn update_create_fields(ui: &AppWindow, st: &S) {
     let text = s.create_inputs.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join("\n");
     ui.set_create_sources(text.into());
     let fmt = Format::writable()[ui.get_format_index().max(0) as usize];
-    if !s.create_inputs.is_empty() {
-        ui.set_create_output(archiver_core::suggest_output(&s.create_inputs, fmt).display().to_string().into());
+    let each = ui.get_create_each();
+    let cur = ui.get_create_output();
+    let cur = Path::new(cur.trim());
+    if let Some(first) = s.create_inputs.first() {
+        if !each {
+            ui.set_create_output(archiver_core::suggest_output(&s.create_inputs, fmt).display().to_string().into());
+        } else if cur.as_os_str().is_empty() || (!cur.is_dir() && Format::detect(cur).is_some()) {
+            // empty, or still the single-archive file name: use the first input's folder
+            let dir = first.parent().filter(|p| !p.as_os_str().is_empty()).map(Path::to_path_buf).or_else(|| std::env::current_dir().ok()).unwrap_or_default();
+            ui.set_create_output(dir.display().to_string().into());
+        }
     }
-    ui.set_single_file_warning(fmt.is_single_file() && s.create_inputs.len() != 1);
+    let warn = if each { s.create_inputs.iter().any(|p| p.is_dir()) } else { s.create_inputs.len() != 1 };
+    ui.set_single_file_warning(fmt.is_single_file() && warn);
 }
 
 fn apply_format(ui: &AppWindow, st: &S, idx: usize) {
@@ -486,10 +642,11 @@ fn start_create(ui: &AppWindow, st: &S) {
     let fmt = Format::writable()[ui.get_format_index().max(0) as usize];
     let output = PathBuf::from(ui.get_create_output().trim());
     let inputs = st.borrow().create_inputs.clone();
-    if inputs.is_empty() || output.as_os_str().is_empty() {
+    let each = ui.get_create_each();
+    if inputs.is_empty() || output.as_os_str().is_empty() || is_busy(ui, st) {
         return;
     }
-    if output.exists() && !confirm("覆寫檔案？", &format!("{} 已存在，要覆寫嗎？", output.display())) {
+    if !each && output.exists() && !confirm("覆寫檔案？", &format!("{} 已存在，要覆寫嗎？", output.display())) {
         return;
     }
     let pw = ui.get_create_password().to_string();
@@ -500,6 +657,15 @@ fn start_create(ui: &AppWindow, st: &S) {
     };
     st.borrow_mut().create_inputs.clear();
     ui.set_dialog("".into());
+    if each {
+        // output is a folder; core picks a unique archive name per input
+        return spawn(ui, st, "分批壓縮中…", move |p| {
+            if let Err(e) = std::fs::create_dir_all(&output) {
+                return Msg::Done(Err(format!("{}: {e}", output.display())), After::Nothing);
+            }
+            batch_msg(&archiver_core::create_each(&inputs, Some(&output), &opts, p))
+        });
+    }
     spawn(ui, st, "壓縮中…", move |p| {
         let r = archiver_core::create(&output, &inputs, &opts, p)
             .map(|_| format!("已建立 {}", output.display()))
@@ -516,21 +682,36 @@ fn do_action(ui: &AppWindow, st: &S, a: &str) {
                 open_archive(ui, st, p);
             }
         }
-        "add" => {
-            let fs_sel: Vec<PathBuf> = {
-                let s = st.borrow();
-                match &s.mode {
-                    Mode::Fs(_) => selected_items(&s).into_iter().map(|i| PathBuf::from(i.full)).collect(),
-                    _ => vec![],
-                }
-            };
-            if !fs_sel.is_empty() {
-                open_create(ui, st, fs_sel);
-            } else if let Some(f) = rfd::FileDialog::new().set_title("選擇要加入的檔案").pick_files() {
-                open_create(ui, st, f);
+        "add" => do_add(ui, st, None),
+        "add-each" => do_add(ui, st, Some(true)),
+        "extract" => do_extract(ui, st),
+        "extract-here" => do_extract_each(ui, st, BatchDest::Beside),
+        "extract-each" => do_extract_each(ui, st, BatchDest::BesideInFolder),
+        "copy" => do_copy(ui, st),
+        "copy-text" => {
+            let text = ui.get_preview_text();
+            let r = st.borrow_mut().clip.copy_text(&text);
+            match r {
+                Ok(()) => set_status(ui, st, "已複製文字到剪貼簿"),
+                Err(e) => set_status(ui, st, format!("錯誤：{e}")),
             }
         }
-        "extract" => do_extract(ui, st),
+        "refresh" => {
+            let arc = {
+                let mut s = st.borrow_mut();
+                s.status.clear();
+                match &s.mode {
+                    Mode::Archive { path, .. } => Some(path.clone()),
+                    Mode::Fs(_) => None,
+                }
+            };
+            match arc {
+                Some(p) => reload_archive_keep_prefix(ui, st, p),
+                None => refresh(ui, st),
+            }
+        }
+        "preview-changed" => selection_changed(ui, st),
+        "create-each-changed" => update_create_fields(ui, st),
         "test" => do_test(ui, st),
         "view" => {
             let first = selected_items(&st.borrow()).into_iter().find(|i| !i.is_dir);
@@ -589,6 +770,16 @@ fn do_action(ui: &AppWindow, st: &S, a: &str) {
                 open_archive(ui, st, p);
             }
         }
+        "create-browse" if ui.get_create_each() => {
+            let cur = PathBuf::from(ui.get_create_output().trim());
+            let mut d = rfd::FileDialog::new().set_title("選擇輸出資料夾");
+            if cur.is_dir() {
+                d = d.set_directory(&cur);
+            }
+            if let Some(p) = d.pick_folder() {
+                ui.set_create_output(p.display().to_string().into());
+            }
+        }
         "create-browse" => {
             let cur = PathBuf::from(ui.get_create_output().to_string());
             let mut d = rfd::FileDialog::new().set_title("儲存壓縮檔");
@@ -617,6 +808,7 @@ fn do_action(ui: &AppWindow, st: &S, a: &str) {
                 s.status.clear();
             }
             push_rows(ui, st);
+            selection_changed(ui, st);
         }
         "up" => go_up(ui, st),
         "cancel" => {
@@ -660,6 +852,7 @@ fn go_up(ui: &AppWindow, st: &S) {
             };
             if let Some(d) = next {
                 s.mode = Mode::Fs(d);
+                s.pv.cache = None;
             }
         }
     }
@@ -737,15 +930,333 @@ fn do_extract(ui: &AppWindow, st: &S) {
         };
     }
     let Some(dest) = rfd::FileDialog::new().set_title("解壓縮到").set_directory(&start).pick_folder() else { return };
-    spawn(ui, st, "解壓縮中…", move |p| {
-        for a in &sources {
-            let to = if sources.len() > 1 { dest.join(archiver_core::archive_stem(a)) } else { dest.clone() };
-            if let Err(e) = archiver_core::extract(a, &to, pw.as_deref(), sel.as_deref(), p) {
-                return Msg::Done(Err(format!("{}: {e}", a.display())), After::Nothing);
+    if sources.len() > 1 {
+        let dest = BatchDest::IntoFolders(dest);
+        return spawn(ui, st, "解壓縮中…", move |p| batch_msg(&archiver_core::extract_each(&sources, &dest, pw.as_deref(), p)));
+    }
+    spawn(ui, st, "解壓縮中…", move |p| match archiver_core::extract(&sources[0], &dest, pw.as_deref(), sel.as_deref(), p) {
+        Ok(()) => Msg::Done(Ok(format!("已解壓縮到 {}", dest.display())), After::ReloadFs),
+        Err(e) => Msg::Done(Err(format!("{}: {e}", sources[0].display())), After::Nothing),
+    });
+}
+
+/// "Extract here" / "extract each to its own folder": the selected archives (file-system
+/// mode) or the open archive.
+fn do_extract_each(ui: &AppWindow, st: &S, dest: BatchDest) {
+    let (arcs, pw) = {
+        let s = st.borrow();
+        let arcs: Vec<PathBuf> = match &s.mode {
+            Mode::Archive { path, .. } => vec![path.clone()],
+            Mode::Fs(_) => selected_items(&s).into_iter().filter(|i| !i.is_dir && Format::detect(Path::new(&i.name)).is_some()).map(|i| PathBuf::from(i.full)).collect(),
+        };
+        (arcs, opt_pw(&s))
+    };
+    if arcs.is_empty() {
+        return set_status(ui, st, "請先開啟或選取壓縮檔");
+    }
+    spawn(ui, st, "解壓縮中…", move |p| batch_msg(&archiver_core::extract_each(&arcs, &dest, pw.as_deref(), p)));
+}
+
+fn do_add(ui: &AppWindow, st: &S, each: Option<bool>) {
+    let fs_sel: Vec<PathBuf> = {
+        let s = st.borrow();
+        match &s.mode {
+            Mode::Fs(_) => selected_items(&s).into_iter().map(|i| PathBuf::from(i.full)).collect(),
+            _ => vec![],
+        }
+    };
+    if !fs_sel.is_empty() {
+        open_create(ui, st, fs_sel, each);
+    } else if let Some(f) = rfd::FileDialog::new().set_title("選擇要加入的檔案").pick_files() {
+        open_create(ui, st, f, each);
+    }
+}
+
+// ------------------------------------------------------------------ clipboard
+
+fn copy_to_clipboard(ui: &AppWindow, st: &S, paths: &[PathBuf]) {
+    let r = st.borrow_mut().clip.copy_files(paths);
+    match r {
+        Ok(()) => {
+            // the previous staging copy is no longer on the clipboard: free its disk space now
+            let staged = paths.first().and_then(|p| view::clip_dir_of(p));
+            let old = std::mem::replace(&mut st.borrow_mut().last_clip, staged.clone());
+            if let Some(old) = old.filter(|o| Some(o) != staged.as_ref()) {
+                std::thread::spawn(move || std::fs::remove_dir_all(old));
+            }
+            set_status(ui, st, format!("已複製 {} 個項目到剪貼簿，可在檔案總管中貼上", paths.len()))
+        }
+        Err(e) => {
+            set_status(ui, st, format!("錯誤：{e}"));
+            error_box(&e);
+        }
+    }
+}
+
+/// Write the cached bytes of a single archive entry into a fresh clipboard staging folder.
+fn stage_bytes(bytes: &[u8], items: &[Item], single_file: bool) -> std::io::Result<Vec<PathBuf>> {
+    let dest = view::new_clip_dir()?;
+    let paths = view::extracted_paths(&dest, items, single_file);
+    let r = (|| {
+        let target = paths.first().ok_or_else(|| std::io::Error::other("no target path"))?;
+        if let Some(dir) = target.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::write(target, bytes)
+    })();
+    if r.is_err() {
+        let _ = std::fs::remove_dir_all(&dest);
+    }
+    r.map(|()| paths)
+}
+
+/// Copy the selected items to the clipboard as files (archive items are extracted first).
+fn do_copy(ui: &AppWindow, st: &S) {
+    let (sel, arc, pw) = {
+        let s = st.borrow();
+        let arc = match &s.mode {
+            Mode::Archive { path, fmt, .. } => Some((path.clone(), *fmt)),
+            Mode::Fs(_) => None,
+        };
+        (selected_items(&s), arc, opt_pw(&s))
+    };
+    if sel.is_empty() {
+        return set_status(ui, st, "請先選取要複製的檔案");
+    }
+    let Some((arc, fmt)) = arc else {
+        let paths: Vec<PathBuf> = sel.iter().map(|i| PathBuf::from(&i.full)).collect();
+        return copy_to_clipboard(ui, st, &paths);
+    };
+    // quick path: the preview already holds the complete entry
+    if let [it] = sel.as_slice()
+        && !it.is_dir
+    {
+        let staged = {
+            let s = st.borrow();
+            s.pv.cache.as_ref().filter(|(a, n, _)| *a == arc && *n == it.full).map(|(_, _, b)| stage_bytes(b, &sel, fmt.is_single_file()))
+        };
+        if let Some(Ok(paths)) = staged {
+            return copy_to_clipboard(ui, st, &paths);
+        }
+    }
+    let names: Vec<String> = sel.iter().map(|i| i.full.clone()).collect();
+    spawn(ui, st, "複製到剪貼簿…", move |p| {
+        let dest = match view::new_clip_dir() {
+            Ok(d) => d,
+            Err(e) => return Msg::Done(Err(e.to_string()), After::Nothing),
+        };
+        let r = archiver_core::extract(&arc, &dest, pw.as_deref(), Some(&names), p).map_err(|e| e.to_string()).and_then(|_| {
+            // only what was really written (entries core refused are not on disk)
+            let paths: Vec<PathBuf> = view::extracted_paths(&dest, &sel, fmt.is_single_file()).into_iter().filter(|p| p.exists()).collect();
+            if paths.is_empty() { Err("沒有可複製的檔案".to_string()) } else { Ok(paths) }
+        });
+        match r {
+            Ok(paths) => Msg::Done(Ok(String::new()), After::CopyFiles(paths)),
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&dest);
+                Msg::Done(Err(e), After::Nothing)
             }
         }
-        Msg::Done(Ok(format!("已解壓縮到 {}", dest.display())), After::ReloadFs)
     });
+}
+
+// ------------------------------------------------------------------ preview pane
+
+fn set_preview(ui: &AppWindow, mode: &str, title: &str, meta: &str, text: &str) {
+    ui.set_preview_mode(mode.into());
+    ui.set_preview_title(title.into());
+    ui.set_preview_meta(meta.into());
+    ui.set_preview_text(text.into());
+}
+
+/// "12,345 位元組　2026/10/10 12:00　CRC32 0000ABCD"
+fn item_meta(it: &Item) -> String {
+    let mut v = Vec::new();
+    if let Some(n) = it.size {
+        v.push(format!("{} 位元組", view::fmt_num(n)));
+    }
+    if !it.modified.is_empty() {
+        v.push(it.modified.replace('-', "/"));
+    }
+    if let Some(c) = it.crc {
+        v.push(format!("CRC32 {c:08X}"));
+    }
+    v.join("　")
+}
+
+/// Contents of the archive folder `dir` (entry name without trailing '/').
+fn folder_summary(entries: &[Entry], dir: &str) -> String {
+    let prefix = format!("{}/", dir.trim_end_matches('/'));
+    let (mut files, mut bytes, mut dirs) = (0usize, 0u64, BTreeSet::new());
+    for e in entries {
+        let name = e.name.replace('\\', "/");
+        let name = name.trim_start_matches("./").trim_start_matches('/');
+        let Some(rest) = name.strip_prefix(&prefix) else { continue };
+        let rest = rest.trim_end_matches('/');
+        if rest.is_empty() {
+            continue;
+        }
+        for (i, c) in rest.char_indices() {
+            if c == '/' {
+                dirs.insert(rest[..i].to_string());
+            }
+        }
+        if e.is_dir {
+            dirs.insert(rest.to_string());
+        } else {
+            files += 1;
+            bytes += e.size;
+        }
+    }
+    format!("包含 {files} 個檔案、{} 個資料夾\n共 {} 個位元組", dirs.len(), view::fmt_num(bytes))
+}
+
+/// Selection changed (or the pane was toggled / the listing reloaded): cancel the running
+/// preview and show the new one (files are read after a short debounce).
+fn selection_changed(ui: &AppWindow, st: &S) {
+    let mut s = st.borrow_mut();
+    s.pv.generation += 1;
+    s.pv.cancel.store(true, Ordering::Relaxed);
+    s.pv.timer.stop();
+    if !ui.get_preview_visible() {
+        return;
+    }
+    ui.set_preview_image(slint::Image::default());
+    let sel = selected_items(&s);
+    let it = match sel.as_slice() {
+        [] => return set_preview(ui, "none", "", "", ""),
+        [it] => it.clone(),
+        many => {
+            let bytes: u64 = many.iter().filter_map(|i| i.size).sum();
+            return set_preview(ui, "info", &format!("已選取 {} 個項目", many.len()), "", &format!("共 {} 個位元組", view::fmt_num(bytes)));
+        }
+    };
+    let meta = item_meta(&it);
+    if it.is_dir {
+        let text = match &s.mode {
+            Mode::Archive { entries, .. } => folder_summary(entries, &it.full),
+            Mode::Fs(_) => "檔案資料夾（按兩下開啟）".to_string(),
+        };
+        return set_preview(ui, "folder", &it.name, &meta, &text);
+    }
+    set_preview(ui, "loading", &it.name, &meta, "");
+    let generation = s.pv.generation;
+    let (w, weak) = (ui.as_weak(), Rc::downgrade(st));
+    s.pv.timer.start(slint::TimerMode::SingleShot, PREVIEW_DEBOUNCE, move || {
+        if let Some(st) = weak.upgrade()
+            && w.upgrade().is_some()
+        {
+            start_preview(&st, generation, &it);
+        }
+    });
+}
+
+fn start_preview(st: &S, generation: u64, it: &Item) {
+    let mut s = st.borrow_mut();
+    if s.pv.generation != generation {
+        return;
+    }
+    let src = match &s.mode {
+        Mode::Archive { path, .. } => PvSrc::Entry { archive: path.clone(), name: it.full.clone(), password: opt_pw(&s) },
+        Mode::Fs(_) => PvSrc::File(PathBuf::from(&it.full)),
+    };
+    let cancel = Arc::new(AtomicBool::new(false));
+    s.pv.cancel = cancel.clone();
+    let (tx, name) = (s.pv.tx.clone(), it.name.clone());
+    std::thread::spawn(move || {
+        let _ = tx.send(preview_worker(generation, src, &name, cancel));
+    });
+}
+
+/// First `max` bytes of a file and whether it is longer.
+fn read_head(path: &Path, max: usize) -> std::io::Result<(Vec<u8>, bool)> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?.take(max as u64 + 1).read_to_end(&mut bytes)?;
+    let truncated = bytes.len() > max;
+    bytes.truncate(max);
+    Ok((bytes, truncated))
+}
+
+/// Background part of a preview: read the data and classify it.
+fn preview_worker(generation: u64, src: PvSrc, name: &str, cancel: Arc<AtomicBool>) -> PreviewDone {
+    let limit = preview::read_limit(name);
+    let read = match &src {
+        PvSrc::Entry { archive, name: entry, password } => {
+            let noop = |_: u64, _: u64, _: &str| {};
+            archiver_core::read_entry(archive, entry, password.as_deref(), limit, &Progress { on: &noop, cancel }).map(|d| (d.bytes, d.truncated)).map_err(|e| e.to_string())
+        }
+        PvSrc::File(p) => read_head(p, limit).map_err(|e| e.to_string()),
+    };
+    let (bytes, truncated) = match read {
+        Ok(r) => r,
+        Err(e) => return PreviewDone { generation, body: PvBody::Error(e), full: None },
+    };
+    let body = match preview::classify(name, &bytes, truncated) {
+        Preview::Text(t) => PvBody::Text(t),
+        Preview::Hex(h) => PvBody::Hex(h),
+        Preview::Empty => PvBody::Empty,
+        Preview::Image(ImageKind::Svg) => PvBody::Svg(bytes.clone(), preview::hex_dump(&bytes, HEX_FALLBACK)),
+        Preview::Image(ImageKind::Raster) => {
+            let ext = Path::new(name).extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_else(|| "img".into());
+            let dir = view::temp_view_dir().join("preview");
+            let file = dir.join(format!("{generation}.{ext}"));
+            match std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&file, &bytes)) {
+                Ok(()) => PvBody::Raster(file, preview::hex_dump(&bytes, HEX_FALLBACK)),
+                Err(_) => PvBody::Hex(preview::hex_dump(&bytes, HEX_FALLBACK)),
+            }
+        }
+    };
+    let full = match src {
+        PvSrc::Entry { archive, name, .. } if !truncated => Some((archive, name, bytes)),
+        _ => None,
+    };
+    PreviewDone { generation, body, full }
+}
+
+/// Apply the finished preview of the current generation (called from the poll timer).
+fn poll_preview(ui: &AppWindow, st: &S) {
+    let mut latest = None;
+    {
+        let s = st.borrow();
+        while let Ok(d) = s.pv.rx.try_recv() {
+            if d.generation == s.pv.generation {
+                latest = Some(d);
+            } else if let PvBody::Raster(p, _) = &d.body {
+                let _ = std::fs::remove_file(p);
+            }
+        }
+    }
+    let Some(d) = latest else { return };
+    if d.full.is_some() {
+        st.borrow_mut().pv.cache = d.full;
+    }
+    let (mode, text) = match d.body {
+        PvBody::Text(t) => ("text", t),
+        PvBody::Hex(h) => ("hex", h),
+        PvBody::Empty => ("info", "（空白檔案，0 位元組）".to_string()),
+        PvBody::Raster(p, fallback) => {
+            let img = slint::Image::load_from_path(&p);
+            let _ = std::fs::remove_file(&p); // already decoded into memory
+            match img {
+                Ok(img) => {
+                    ui.set_preview_image(img);
+                    ("image", String::new())
+                }
+                Err(_) => ("hex", fallback),
+            }
+        }
+        PvBody::Svg(data, fallback) => match slint::Image::load_from_svg_data(&data) {
+            Ok(img) => {
+                ui.set_preview_image(img);
+                ("image", String::new())
+            }
+            Err(_) => ("hex", fallback),
+        },
+        PvBody::Error(e) => ("error", if is_password_err(&e) { PREVIEW_PW_MSG.to_string() } else { format!("無法預覽：{e}") }),
+    };
+    ui.set_preview_text(text.into());
+    ui.set_preview_mode(mode.into());
 }
 
 fn do_test(ui: &AppWindow, st: &S) {
@@ -827,7 +1338,7 @@ fn handle_drops(ui: &AppWindow, st: &S, drops: Vec<PathBuf>) {
     if drops.len() == 1 && drops[0].is_file() && Format::detect(&drops[0]).is_some() && ui.get_dialog() != "create" {
         open_archive(ui, st, drops[0].clone());
     } else {
-        open_create(ui, st, drops);
+        open_create(ui, st, drops, None);
     }
 }
 
@@ -880,18 +1391,8 @@ fn wire_callbacks(ui: &AppWindow, st: &S) {
                     s.anchor = Some(i);
                 }
             }
-            // update only the selection flags in the existing model
-            let rows = ui.get_rows();
-            let s = st.borrow();
-            for (k, &sel) in s.selected.iter().enumerate() {
-                if let Some(mut r) = rows.row_data(k) {
-                    if r.selected != sel {
-                        r.selected = sel;
-                        rows.set_row_data(k, r);
-                    }
-                }
-            }
-            update_status(&ui, &s);
+            sync_selection(&ui, &st);
+            selection_changed(&ui, &st);
         });
     }
     {
@@ -951,6 +1452,8 @@ fn wire_callbacks(ui: &AppWindow, st: &S) {
                     }
                 }
                 "up" => go_up(&ui, &st),
+                "prev" => move_selection(&ui, &st, -1),
+                "next" => move_selection(&ui, &st, 1),
                 "delete" => {
                     if ui.get_can_delete() {
                         do_delete(&ui, &st);
@@ -1007,11 +1510,60 @@ fn error_box(text: &str) {
 mod tests {
     use super::*;
 
+    use archiver_core::Error;
+
+    fn r(input: &str, result: archiver_core::Result<()>) -> BatchResult {
+        BatchResult { input: PathBuf::from(input), output: PathBuf::from("out"), result }
+    }
+
     #[test]
-    fn extract_destinations() {
-        let a = Path::new("/data/in/Photos 2024.tar.gz");
-        assert_eq!(extract_dest(a, false), Path::new("/data/in"));
-        assert_eq!(extract_dest(a, true), Path::new("/data/in/Photos 2024"));
-        assert_eq!(extract_dest(Path::new("/x/a.ZIP"), true), Path::new("/x/a"));
+    fn summary() {
+        let ok = vec![r("/a/x.zip", Ok(())), r("/a/y.zip", Ok(()))];
+        assert_eq!(batch_summary(&ok), ("已完成 2 個（成功 2，失敗 0）".to_string(), 0));
+        assert_eq!(single_password_failure(&ok), None);
+
+        let mixed = vec![r("/a/x.zip", Ok(())), r("/a/b c.7z", Err(Error::Cancelled))];
+        let (text, failed) = batch_summary(&mixed);
+        assert_eq!(failed, 1);
+        assert_eq!(text, "已完成 2 個（成功 1，失敗 1）\n✗ b c.7z：operation cancelled");
+
+        let many: Vec<BatchResult> = (0..25).map(|i| r(&format!("/d/{i}.zip"), Err(Error::Unsupported("x".into())))).collect();
+        let (text, failed) = batch_summary(&many);
+        assert_eq!(failed, 25);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 1 + 20 + 1);
+        assert_eq!(lines[1], "✗ 0.zip：unsupported format: x");
+        assert_eq!(lines[21], "…還有 5 個");
+    }
+
+    #[test]
+    fn password_failure() {
+        let pw = || Err(Error::SevenZ("wrong password".into()));
+        assert_eq!(single_password_failure(&[r("/a/x.zip", Ok(())), r("/a/e.7z", pw())]), Some(PathBuf::from("/a/e.7z")));
+        assert_eq!(single_password_failure(&[r("/a/e.7z", pw()), r("/a/f.7z", pw())]), None);
+        assert_eq!(single_password_failure(&[r("/a/x.zip", Err(Error::Cancelled))]), None);
+        assert!(is_password_err("Password required") && !is_password_err("I/O error"));
+    }
+
+    #[test]
+    fn meta_and_folder() {
+        let it = Item { name: "a.txt".into(), full: "d/a.txt".into(), is_dir: false, is_parent: false, size: Some(12345), packed: None, modified: "2026-10-10 12:00".into(), crc: Some(0xAB) };
+        assert_eq!(item_meta(&it), "12,345 位元組　2026/10/10 12:00　CRC32 000000AB");
+        assert_eq!(item_meta(&Item::parent()), "");
+        let e = |name: &str, size: u64, is_dir: bool| Entry { name: name.into(), size, compressed: None, modified: None, is_dir, crc32: None, encrypted: false };
+        let es = vec![e("d/", 0, true), e("d/a.txt", 1000, false), e("d/s/t/b.bin", 234, false), e("d/e/", 0, true), e("dx/c", 5, false), e("x", 1, false)];
+        assert_eq!(folder_summary(&es, "d"), "包含 2 個檔案、3 個資料夾\n共 1,234 個位元組");
+        assert_eq!(folder_summary(&es, "nope"), "包含 0 個檔案、0 個資料夾\n共 0 個位元組");
+    }
+
+    #[test]
+    fn head_of_file() {
+        let t = tempfile::tempdir().unwrap();
+        let f = t.path().join("f.bin");
+        std::fs::write(&f, b"0123456789").unwrap();
+        assert_eq!(read_head(&f, 4).unwrap(), (b"0123".to_vec(), true));
+        assert_eq!(read_head(&f, 10).unwrap(), (b"0123456789".to_vec(), false));
+        assert_eq!(read_head(&f, 64).unwrap(), (b"0123456789".to_vec(), false));
+        assert!(read_head(&t.path().join("missing"), 4).is_err());
     }
 }

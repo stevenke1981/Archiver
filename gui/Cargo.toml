@@ -9,6 +9,8 @@ archiver-core = { path = "../core" }
 rfd = { version = "0.17.2", default-features = false, features = ["gtk3"] }
 slint = { version = "1.18.1", default-features = false, features = ["std", "compat-1-2", "backend-winit", "renderer-software", "software-renderer-systemfonts", "unstable-winit-030"] }
 chrono = "0.4.45"
+# already in the dependency tree through Slint; file-list clipboard on Windows/macOS/X11/Wayland
+arboard = { version = "3.6.1", default-features = false }
 
 # Windows: the software renderer's partial (damage-region) presentation via softbuffer
 # leaves parts of the window unpainted/transparent on some systems, so use Skia there.

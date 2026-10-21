@@ -220,6 +220,87 @@ pub fn temp_view_dir() -> PathBuf {
     std::env::temp_dir().join(format!("archiver-view-{}", std::process::id()))
 }
 
+/// Root of the clipboard staging folders. Unlike [`temp_view_dir`] it is not removed when the
+/// program exits, so files copied from an archive can still be pasted afterwards.
+/// Per user: %TEMP% on Windows; on Unix the shared /tmp is avoided (another user could plant the
+/// folder or a symlink there), the user's cache folder is used instead.
+pub fn clip_root() -> PathBuf {
+    #[cfg(unix)]
+    {
+        let cache = std::env::var_os("XDG_CACHE_HOME").map(PathBuf::from).filter(|p| p.is_absolute());
+        let cache = cache.or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")));
+        if let Some(c) = cache {
+            return c.join("archiver-clipboard");
+        }
+    }
+    std::env::temp_dir().join("archiver-clipboard")
+}
+
+/// The staging folder (direct child of [`clip_root`]) that holds `path`, if any.
+pub fn clip_dir_of(path: &Path) -> Option<PathBuf> {
+    let root = clip_root();
+    let first = path.strip_prefix(&root).ok()?.components().next()?;
+    Some(root.join(first))
+}
+
+/// Create a fresh, empty staging folder under [`clip_root`].
+pub fn new_clip_dir() -> std::io::Result<PathBuf> {
+    new_clip_dir_in(&clip_root())
+}
+
+fn new_clip_dir_in(root: &Path) -> std::io::Result<PathBuf> {
+    static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let millis = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+    let dir = root.join(format!("{}-{millis}-{n}", std::process::id()));
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
+/// Remove staging folders under [`clip_root`] older than `max_age` (best effort).
+pub fn purge_old_clips(max_age: std::time::Duration) {
+    purge_in(&clip_root(), max_age)
+}
+
+fn purge_in(root: &Path, max_age: std::time::Duration) {
+    // never follow a symlinked root (it could point anywhere)
+    if !std::fs::symlink_metadata(root).is_ok_and(|m| m.is_dir()) {
+        return;
+    }
+    let Ok(rd) = std::fs::read_dir(root) else { return };
+    let now = std::time::SystemTime::now();
+    for e in rd.flatten() {
+        let Ok(md) = e.metadata() else { continue };
+        if !md.is_dir() {
+            continue;
+        }
+        let Ok(modified) = md.modified() else { continue };
+        if matches!(now.duration_since(modified), Ok(age) if age >= max_age) {
+            let _ = std::fs::remove_dir_all(e.path());
+        }
+    }
+}
+
+/// Paths of `items` (archive items of the current listing) after they were extracted into
+/// `dest`. `single_file`: the archive is .gz/.bz2/.xz/.zst (the one entry lands at `dest/name`).
+/// Names that would leave `dest` (`..`, drive prefixes) are dropped, as core does not extract them.
+pub fn extracted_paths(dest: &Path, items: &[Item], single_file: bool) -> Vec<PathBuf> {
+    items
+        .iter()
+        .filter(|it| !it.is_parent)
+        .filter_map(|it| {
+            if single_file {
+                return Some(dest.join(&it.name));
+            }
+            let parts: Vec<&str> = it.full.split(['/', '\\']).filter(|c| !c.is_empty() && *c != ".").collect();
+            if parts.is_empty() || parts.iter().any(|c| *c == ".." || c.contains(':')) {
+                return None;
+            }
+            Some(parts.iter().fold(dest.to_path_buf(), |p, c| p.join(c)))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -292,5 +373,58 @@ mod tests {
         sort_items(&mut v, 0, true);
         assert_eq!(v[0].name, "sub");
         assert_eq!(v[1].size, Some(3));
+    }
+
+    fn arch_item(full: &str, is_dir: bool) -> Item {
+        Item { name: full.rsplit('/').next().unwrap_or(full).into(), full: full.into(), is_dir, is_parent: false, size: None, packed: None, modified: String::new(), crc: None }
+    }
+
+    #[test]
+    fn clip_dirs_are_fresh_and_under_root() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("nested").join("root");
+        let a = new_clip_dir_in(&root).unwrap();
+        let b = new_clip_dir_in(&root).unwrap();
+        assert_ne!(a, b);
+        assert!(a.is_dir() && b.is_dir());
+        assert_eq!(a.parent(), Some(root.as_path()));
+    }
+
+    #[test]
+    fn purge_removes_only_old_dirs() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path();
+        std::fs::create_dir(root.join("old")).unwrap();
+        std::fs::write(root.join("file.txt"), b"x").unwrap();
+        purge_in(root, std::time::Duration::from_secs(60 * 60 * 24 * 365 * 100));
+        assert!(root.join("old").is_dir());
+        purge_in(root, std::time::Duration::ZERO);
+        assert!(!root.join("old").exists());
+        assert!(root.join("file.txt").is_file());
+        purge_in(&root.join("missing"), std::time::Duration::ZERO);
+    }
+
+    #[test]
+    fn extracted_paths_stay_inside_dest() {
+        let d = Path::new("/out");
+        let items = vec![
+            Item::parent(),
+            arch_item("a/b.txt", false),
+            arch_item("a/sub", true),
+            arch_item("../../x.txt", false),
+            arch_item("a\\..\\..\\z", false),
+            arch_item("C:\\win\\y", false),
+        ];
+        // names core refuses to extract are dropped instead of pointing at something else
+        let got = extracted_paths(d, &items, false);
+        assert_eq!(got, vec![d.join("a").join("b.txt"), d.join("a").join("sub")]);
+        assert!(extracted_paths(d, &[arch_item("./c.txt", false), arch_item("notes:v1", false)], false) == vec![d.join("c.txt")]);
+    }
+
+    #[test]
+    fn extracted_paths_single_file() {
+        let d = Path::new("/out");
+        let got = extracted_paths(d, &[Item::parent(), arch_item("data.txt", false)], true);
+        assert_eq!(got, vec![d.join("data.txt")]);
     }
 }
