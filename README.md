@@ -14,7 +14,22 @@
 - 檔案清單：名稱、大小、封裝後、類型、修改日期、CRC32；`..` 回上層、雙擊進入壓縮檔內的資料夾、點欄位標題排序、Ctrl/Shift 多選、雙擊檔案會解壓到暫存資料夾並用系統預設程式開啟
 - 狀態列：`總共 N 個檔案, X 個位元組` 與選取資訊
 - 未開啟壓縮檔時即為檔案管理員模式，可瀏覽本機資料夾，雙擊壓縮檔即開啟
-- 鍵盤：Enter 開啟、Backspace 上一層、Delete 刪除、Ctrl+A 全選
+- 鍵盤：Enter 開啟、Backspace 上一層、Delete 刪除、Ctrl+A 全選、↑／↓ 移動選取、Ctrl+C 複製到剪貼簿、Ctrl+F 尋找、F3 以預設程式檢視、F5 重新整理
+
+### 預覽與複製（v0.6.0 起）
+
+- 右側預覽窗格（工具列「預覽」或「選項」選單切換）：選取一個項目即即時預覽，不必先解壓縮
+  - 文字（UTF-8、UTF-8／UTF-16 BOM）最多顯示前 256 KiB；PNG／JPEG／SVG 圖片；其他檔案顯示十六進位傾印
+  - 資料夾顯示所含檔案數與總大小；多選時顯示選取數量
+  - 加密項目會提示先輸入壓縮檔密碼
+- 複製到剪貼簿（工具列「複製」、Ctrl+C、預覽窗格「複製檔案」）：選取的檔案／資料夾以「檔案」形式放上系統剪貼簿，可直接在檔案總管／Finder／檔案管理員貼上。已預覽完整內容的單一檔案立即複製，其他則先解壓到暫存資料夾（`%TEMP%rchiver-clipboard`，超過 24 小時自動清除）。文字或十六進位內容可用「複製文字」複製
+- 檔案管理員模式下亦可預覽本機檔案並複製到剪貼簿
+
+### 分批壓縮與解壓縮（v0.6.0 起）
+
+- 分批壓縮：「指令 → 分批壓縮（各自建立壓縮檔）…」，或在建立壓縮檔對話框勾選「每個檔案／資料夾分別建立壓縮檔」；每個選取的檔案或資料夾各自成為一個壓縮檔，同名時自動改名為 `名稱 (2).zip`
+- 分批解壓縮：選取多個壓縮檔後「解壓縮到」會分別解到目標資料夾下各自的子資料夾；「指令 → 解壓縮到這裡」「分別解壓縮到各自資料夾」可一次處理多個壓縮檔
+- 某個項目失敗不會中斷整批，完成後顯示摘要（成功／失敗數與錯誤原因）；取消則停止其餘項目
 
 ### 一般
 
@@ -116,12 +131,15 @@ cargo test
 rarc l archive.7z -p 密碼          # 列出內容
 rarc x archive.rar -o 輸出資料夾     # 解壓（可在後面列出指定項目）
 rarc c out.tar.zst 資料夾 檔案 -l 19  # 建立（格式依副檔名決定）
+rarc ce a.txt 照片 文件 -f zip -o 輸出資料夾   # 分批壓縮：每個輸入各自成為一個壓縮檔
+rarc xe *.zip *.7z -o 輸出資料夾              # 分批解壓縮：各自解到 輸出資料夾/<壓縮檔名>/（不加 -o 則解到壓縮檔旁）
 ```
 
 ## 效能
 
 v0.4.0 起使用多執行緒：xz（liblzma MT）、zstd（zstdmt）、7z（固實 + 多執行緒 LZMA2 壓縮與解壓）、平行 ZIP（各檔案分組平行壓縮後直接合併）、平行 gzip（4 MiB 區塊、標準多成員 gzip）。
 以約 490 MB 混合資料、8 核心測試：7z 壓縮 292 秒 → 46 秒、tar.xz 285 → 41 秒、zip 10.5 → 2.4 秒、tar.gz 9.4 → 1.6 秒；詳見 [bench/README.md](bench/README.md)。
+v0.6.0 起 ZIP 解壓縮亦多執行緒平行處理（大於 8 MiB 時），只解壓選取項目時不再開啟未選取的項目；解壓時保留 ZIP／7z 檔案的修改時間。以約 209 MB、1569 個檔案、24 執行緒測試：一般 ZIP 解壓 1.16 → 0.78 秒，AES 加密 ZIP 2.2 → 0.8 秒。
 多執行緒 7z / xz 壓縮時記憶體用量較高（約 1.2–1.4 GB）；可用環境變數 `ARCHIVER_THREADS=2` 限制執行緒數。
 
 ## 專案結構
@@ -138,6 +156,8 @@ v0.4.0 起使用多執行緒：xz（liblzma MT）、zstd（zstdmt）、7z（固�
 - Windows 右鍵選單：選取多個檔案時，Windows 會對每個檔案各啟動一次程式（「加入壓縮檔」會開多個視窗）；Windows 11 需點「顯示更多選項」才看得到（傳統選單），「解壓到資料夾\」無法動態顯示壓縮檔名稱
 - macOS「打開檔案的應用程式」/ 雙擊：檔案是以 Apple Event 傳遞，目前 eframe/winit 未提供此事件，所以 App 會啟動但不會自動載入檔案；請改用 Finder 快速動作或拖放到視窗
 - 快速動作與 Linux 檔案管理員整合僅以產生檔案與格式驗證測試，未在實際桌面上點擊測試
+- 預覽：Big5／GBK 等非 UTF 編碼文字以十六進位顯示；圖片僅支援 PNG／JPEG／SVG（32 MiB 以內）；RAR 大型項目預覽需先解到暫存資料夾
+- 分批解壓縮到同一目標時，主檔名相同的壓縮檔（如 `a.zip` 與 `a.7z`）會解到同一個資料夾
 
 ## License
 
@@ -162,5 +182,7 @@ Windows Explorer cascading "Archiver" submenu via HKCU registry (Open / Extract 
 Linux `.desktop` MIME associations plus Nautilus scripts, Dolphin service menus and Nemo actions;
 macOS Finder Quick Actions in `~/Library/Services`. The app accepts `--open`, `--extract-here`, `--extract-to-folder` and `--compress` with multiple files.
 The macOS release ships a universal (arm64 + x86_64) `Archiver.app` with archive document types declared. Limitations: Windows launches one process per selected file; macOS "Open With" launches the app but the file is not loaded (Apple Events are not exposed by eframe) — use the Quick Actions or drag-and-drop. Prebuilt binaries are on the Releases page.
+
+**Preview & copy (v0.6.0):** a live preview pane shows the selected entry without extracting it (text up to 256 KiB, PNG/JPEG/SVG images, hex dump otherwise, folder summaries); Copy / Ctrl+C puts the selected entries on the system clipboard as files, ready to paste into Explorer/Finder/file managers. **Batch (v0.6.0):** compress each selected file/folder into its own archive (unique names), extract many archives at once (here, into per-archive folders, or into a chosen folder); failures do not stop the batch and a summary is shown. CLI: `rarc ce` / `rarc xe`. Parallel ZIP extraction, partial ZIP extraction never opens unselected entries, ZIP/7z modification times are restored. New keys: arrows, Ctrl+C, Ctrl+F, F3, F5.
 
 **Windows installer (v0.5.1):** `archiver-setup-windows-x64.exe` (Inno Setup, Traditional Chinese / English UI). Installs `archiver.exe` and `rarc.exe` to `Program Files\Archiver`, or per-user without admin (`%LOCALAPPDATA%\Programs\Archiver`, chosen in a dialog or with `/CURRENTUSER`). Start-menu shortcut, optional desktop icon, optional "Open with" associations for zip/7z/rar/tar/gz/tgz/bz2/xz/zst…, optional Explorer context menu (runs `--register-shell`), optional `rarc` on PATH (off by default). Upgrades in place and closes a running Archiver; the uninstaller removes the context menu, associations and PATH entry. The executables now carry the app icon. Build it yourself with `pwsh scripts/build-installer.ps1` after `cargo build --release`. Licensed under MIT.

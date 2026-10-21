@@ -178,7 +178,7 @@ dependencies = [
 
 [[package]]
 name = "archiver"
-version = "0.5.2"
+version = "0.6.0"
 dependencies = [
  "arboard",
  "archiver-core",
@@ -194,7 +194,7 @@ dependencies = [
 
 [[package]]
 name = "archiver-core"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "bzip2",
  "chrono",

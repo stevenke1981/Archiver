@@ -1,5 +1,5 @@
 ﻿; Inno Setup script for Archiver (Windows x64).
-; Build:  ISCC.exe /DAppVersion=0.5.1 /DSrcDir=..\target\release installer\archiver.iss
+; Build:  ISCC.exe /DAppVersion=0.6.0 /DSrcDir=..\target\release installer\archiver.iss
 ; Requires installer\ChineseTraditional.isl (downloaded in CI from the Inno Setup unofficial translations).
 
 #ifndef AppVersion
