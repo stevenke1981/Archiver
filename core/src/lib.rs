@@ -8,6 +8,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use walkdir::WalkDir;
 
+mod batch;
+mod preview;
+pub use batch::{BatchDest, BatchResult, batch_dest, batch_output, create_each, extract_each};
+pub use preview::{EntryData, read_entry};
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("I/O error: {0}")]
@@ -22,6 +27,8 @@ pub enum Error {
     Unsupported(String),
     #[error("operation cancelled")]
     Cancelled,
+    #[error("entry not found: {0}")]
+    NotFound(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -145,7 +152,7 @@ pub struct Entry {
     pub is_dir: bool,
     /// CRC32 of the uncompressed data, when the format stores it (ZIP, 7z, RAR).
     pub crc32: Option<u32>,
-    /// Entry data is encrypted (ZIP/RAR; 7z reports encryption at archive level).
+    /// Entry data is encrypted (ZIP/RAR, 7z with an AES coder).
     pub encrypted: bool,
 }
 
@@ -216,13 +223,20 @@ fn wanted(selected: Option<&[String]>, name: &str) -> bool {
     match selected {
         None => true,
         Some(sel) => {
-            let n = name.trim_end_matches('/');
+            let n = norm_name(name);
             sel.iter().any(|s| {
-                let s = s.trim_end_matches('/');
+                let s = norm_name(s);
                 n == s || n.starts_with(&format!("{s}/"))
             })
         }
     }
+}
+
+/// Entry name as shown to the user: '/' separators, no leading "./" or '/', no trailing '/'
+/// (`tar czf x.tgz .` stores "./a.txt"; selections and previews use "a.txt").
+fn norm_name(name: &str) -> String {
+    let n = name.replace('\\', "/");
+    n.trim_start_matches("./").trim_start_matches('/').trim_end_matches('/').to_string()
 }
 
 // ---------------------------------------------------------------- decoders
@@ -516,7 +530,9 @@ pub fn list(path: &Path, password: Option<&str>) -> Result<Vec<Entry>> {
         Format::SevenZ => {
             let pw = password.map(sevenz_rust2::Password::from).unwrap_or_else(sevenz_rust2::Password::empty);
             let r = sevenz_rust2::ArchiveReader::open(path, pw).map_err(|e| Error::SevenZ(e.to_string()))?;
-            for e in &r.archive().files {
+            let a = r.archive();
+            let aes = |b: usize| a.blocks[b].coders.iter().any(|c| c.encoder_method_id() == sevenz_rust2::EncoderMethod::ID_AES256_SHA256);
+            for (i, e) in a.files.iter().enumerate() {
                 let modified = if e.has_last_modified_date {
                     let st: std::time::SystemTime = e.last_modified_date.into();
                     st.duration_since(std::time::UNIX_EPOCH).ok().and_then(|d| fmt_time(d.as_secs() as i64))
@@ -528,7 +544,7 @@ pub fn list(path: &Path, password: Option<&str>) -> Result<Vec<Entry>> {
                     modified,
                     is_dir: e.is_directory,
                     crc32: if e.has_crc { Some(e.crc as u32) } else { None },
-                    encrypted: false,
+                    encrypted: a.stream_map.file_block_index[i].is_some_and(aes),
                 });
             }
         }
@@ -585,32 +601,7 @@ pub fn extract(archive: &Path, dest: &Path, password: Option<&str>, selected: Op
     fs::create_dir_all(dest)?;
     let done = AtomicU64::new(0);
     match fmt {
-        Format::Zip => {
-            let mut z = zip::ZipArchive::new(BufReader::with_capacity(64 << 10, File::open(archive)?))?;
-            let mut total = 0;
-            for i in 0..z.len() {
-                let f = z.by_index_raw(i)?;
-                if wanted(selected, &f.name()?) { total += f.size(); }
-            }
-            for i in 0..z.len() {
-                p.check()?;
-                let mut f = match password {
-                    Some(pw) => z.by_index_decrypt(i, pw.as_bytes())?,
-                    None => z.by_index(i)?,
-                };
-                let name = f.name()?.to_string();
-                if !wanted(selected, &name) { continue; }
-                let Some(rel) = f.enclosed_name() else { continue };
-                let out = dest.join(rel);
-                if f.is_dir() {
-                    fs::create_dir_all(&out)?;
-                } else {
-                    if let Some(par) = out.parent() { fs::create_dir_all(par)?; }
-                    let mut w = wr(File::create(&out)?);
-                    copy_prog(&mut f, &mut w, &done, total, &name, p)?;
-                }
-            }
-        }
+        Format::Zip => extract_zip(archive, dest, password, selected, threads() as usize, p)?,
         Format::SevenZ => {
             let pw = password.map(sevenz_rust2::Password::from).unwrap_or_else(sevenz_rust2::Password::empty);
             let mut r = sevenz_rust2::ArchiveReader::open(archive, pw).map_err(|e| Error::SevenZ(e.to_string()))?;
@@ -629,6 +620,8 @@ pub fn extract(archive: &Path, dest: &Path, password: Option<&str>, selected: Op
                         if let Some(par) = out.parent() { fs::create_dir_all(par)?; }
                         let mut w = wr(File::create(&out)?);
                         copy_prog(rd, &mut w, &done, total, &e.name, p)?;
+                        let f = w.into_inner().map_err(|e| e.into_error())?;
+                        if e.has_last_modified_date { let _ = f.set_modified(e.last_modified_date.into()); }
                     }
                     Ok(())
                 })();
@@ -687,6 +680,94 @@ pub fn extract(archive: &Path, dest: &Path, password: Option<&str>, selected: Op
         }
     }
     Ok(())
+}
+
+fn open_zip(archive: &Path) -> Result<zip::ZipArchive<BufReader<File>>> {
+    Ok(zip::ZipArchive::new(BufReader::with_capacity(64 << 10, File::open(archive)?))?)
+}
+
+/// ZIP extraction. Entries are chosen from the central directory alone, so unselected entries are
+/// never opened or decrypted. Large jobs are split into size-balanced groups (longest first),
+/// each extracted by its own thread with its own file handle.
+fn extract_zip(archive: &Path, dest: &Path, password: Option<&str>, selected: Option<&[String]>, threads: usize, p: &Progress) -> Result<()> {
+    let mut z = open_zip(archive)?;
+    let (mut files, mut total) = (Vec::new(), 0);
+    // entries landing on the same file (case-insensitive file systems, "a/../b" vs "b") must not be
+    // written by two workers at once: such archives are extracted sequentially (last one wins)
+    let (mut seen, mut collide) = (std::collections::HashSet::new(), false);
+    for i in 0..z.len() {
+        let f = z.by_index_data(i)?;
+        if !wanted(selected, &f.name()?) { continue; }
+        let Some(rel) = f.enclosed_name() else { continue };
+        if f.is_dir() {
+            fs::create_dir_all(dest.join(rel))?;
+        } else {
+            collide |= !seen.insert(rel.to_string_lossy().to_lowercase());
+            total += f.size();
+            files.push((i, f.size()));
+        }
+    }
+    let done = AtomicU64::new(0);
+    let stop = AtomicBool::new(false);
+    let t = threads.min(files.len());
+    if t < 2 || total < ZIP_PARALLEL_MIN || collide {
+        let idx: Vec<usize> = files.iter().map(|f| f.0).collect();
+        return zip_extract_files(&mut z, dest, password, &idx, &done, total, p, &stop);
+    }
+    files.sort_by_key(|f| std::cmp::Reverse(f.1));
+    let mut bins: Vec<(u64, Vec<usize>)> = (0..t).map(|_| (0, Vec::new())).collect();
+    for (i, sz) in files {
+        let b = bins.iter_mut().min_by_key(|b| b.0).unwrap();
+        b.0 += sz;
+        b.1.push(i);
+    }
+    let mut first = Some(z);
+    std::thread::scope(|sc| {
+        let hs: Vec<_> = bins.iter_mut().map(|(_, idx)| {
+            idx.sort_unstable(); // archive order: sequential reads within each worker
+            let (z, done, stop) = (first.take(), &done, &stop);
+            sc.spawn(move || -> Result<()> {
+                let r = match z { Some(z) => Ok(z), None => open_zip(archive) }
+                    .and_then(|mut z| zip_extract_files(&mut z, dest, password, idx, done, total, p, stop));
+                if r.is_err() { stop.store(true, Ordering::Relaxed); }
+                r
+            })
+        }).collect();
+        let mut first_err = None;
+        for h in hs {
+            if let Err(e) = h.join().unwrap_or_else(|_| Err(Error::Io(io::Error::other("worker panicked")))) && first_err.is_none() {
+                first_err = Some(e);
+            }
+        }
+        first_err.map_or(Ok(()), Err)
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn zip_extract_files<R: Read + io::Seek>(z: &mut zip::ZipArchive<R>, dest: &Path, password: Option<&str>, idx: &[usize], done: &AtomicU64, total: u64, p: &Progress, stop: &AtomicBool) -> Result<()> {
+    for &i in idx {
+        p.check()?;
+        if stop.load(Ordering::Relaxed) { break; }
+        let mut f = match password {
+            Some(pw) => z.by_index_decrypt(i, pw.as_bytes())?,
+            None => z.by_index(i)?,
+        };
+        let name = f.name()?.to_string();
+        let Some(out) = f.enclosed_name().map(|rel| dest.join(rel)) else { continue };
+        if let Some(par) = out.parent() { fs::create_dir_all(par)?; }
+        let mut w = BufWriter::with_capacity((f.size() as usize).clamp(8 << 10, BUF), File::create(&out)?);
+        copy_prog(&mut f, &mut w, done, total, &name, p)?;
+        let file = w.into_inner().map_err(|e| e.into_error())?;
+        if let Some(t) = f.last_modified().and_then(zip_mtime) { let _ = file.set_modified(t); }
+    }
+    Ok(())
+}
+
+/// ZIP (MS-DOS) timestamps are local time.
+fn zip_mtime(d: zip::DateTime) -> Option<std::time::SystemTime> {
+    use chrono::TimeZone;
+    let t = chrono::NaiveDate::from_ymd_opt(d.year().into(), d.month().into(), d.day().into())?.and_hms_opt(d.hour().into(), d.minute().into(), d.second().into())?;
+    chrono::Local.from_local_datetime(&t).earliest().map(Into::into)
 }
 
 /// Test archive integrity by decompressing every entry (CRCs / checksums are verified by
@@ -1144,6 +1225,49 @@ mod tests {
     #[test] fn tar_zst() { roundtrip(Format::TarZst, None) }
 
     #[test]
+    fn dot_slash_names_match_selection_and_preview() {
+        // `tar czf x.tgz .` stores "./a.txt"; the GUI shows and selects "a.txt"
+        let t = tempfile::tempdir().unwrap();
+        let out = t.path().join("dot.tar.gz");
+        let mut b = tar::Builder::new(flate2::write::GzEncoder::new(File::create(&out).unwrap(), flate2::Compression::default()));
+        for (n, d) in [("./a.txt", &b"alpha"[..]), ("./d/b.txt", &b"beta"[..])] {
+            let mut h = tar::Header::new_gnu();
+            h.set_size(d.len() as u64);
+            h.set_mode(0o644);
+            h.as_old_mut().name[..n.len()].copy_from_slice(n.as_bytes()); // raw: set_path drops "./"
+            h.set_cksum();
+            b.append(&h, d).unwrap();
+        }
+        b.into_inner().unwrap().finish().unwrap();
+        assert!(list(&out, None).unwrap().iter().any(|e| e.name.starts_with("./")));
+        assert_eq!(read_entry(&out, "d/b.txt", None, 100, &Progress::none()).unwrap().bytes, b"beta");
+        let dest = t.path().join("x");
+        extract(&out, &dest, None, Some(&["a.txt".to_string()]), &Progress::none()).unwrap();
+        assert_eq!(fs::read(dest.join("a.txt")).unwrap(), b"alpha");
+        assert!(!dest.join("d").exists());
+    }
+
+    #[test]
+    fn parallel_zip_same_path_entries_do_not_interleave() {
+        let t = tempfile::tempdir().unwrap();
+        let out = t.path().join("case.zip");
+        let mut w = zip::ZipWriter::new(File::create(&out).unwrap());
+        let o: zip::write::SimpleFileOptions = Default::default();
+        let (big_a, big_b) = (vec![b'A'; 3 << 20], vec![b'b'; 3 << 20]);
+        w.start_file("README.txt", o).unwrap();
+        w.write_all(&big_a).unwrap();
+        w.start_file("other.bin", o).unwrap();
+        w.write_all(&vec![7u8; 5 << 20]).unwrap();
+        w.start_file("readme.txt", o).unwrap();
+        w.write_all(&big_b).unwrap();
+        w.finish().unwrap();
+        let dest = t.path().join("x");
+        extract_zip(&out, &dest, None, None, 4, &Progress::none()).unwrap();
+        let got = fs::read(dest.join("readme.txt")).unwrap();
+        assert!(got == big_a || got == big_b, "interleaved content");
+    }
+
+    #[test]
     fn zip_wrong_password_fails() {
         let t = tempfile::tempdir().unwrap();
         let src = sample(t.path());
@@ -1282,6 +1406,221 @@ mod tests {
         assert_eq!(archive_stem(Path::new("a.zip")), "a");
         assert_eq!(archive_stem(Path::new("notes.txt")), "notes.txt");
         assert!(archive_extensions().contains(&"tar.zst"));
+    }
+
+    fn read(a: &Path, name: &str, pw: Option<&str>, max: usize) -> Result<EntryData> {
+        read_entry(a, name, pw, max, &Progress::none())
+    }
+
+    fn read_entry_cases(fmt: Format, pw: Option<&str>) {
+        let t = tempfile::tempdir().unwrap();
+        let src = sample(t.path());
+        let out = t.path().join(format!("r.{}", fmt.extension()));
+        create(&out, &[src.clone()], &CreateOptions { format: fmt, level: None, password: pw.map(String::from) }, &Progress::none()).unwrap();
+        let hello = fs::read(src.join("hello.txt")).unwrap();
+        assert_eq!(read(&out, "data/hello.txt", pw, 1 << 20).unwrap(), EntryData { bytes: hello.clone(), truncated: false }, "{fmt:?}");
+        assert_eq!(read(&out, "data/sub/deeper/中文.txt", pw, 100).unwrap().bytes, "測試內容".as_bytes(), "{fmt:?}");
+        let bin = fs::read(src.join("sub/a.bin")).unwrap();
+        let r = read(&out, "data/sub/a.bin", pw, 1000).unwrap();
+        assert!(r.truncated && r.bytes == bin[..1000], "{fmt:?}");
+        assert_eq!(read(&out, "data/sub/a.bin", pw, bin.len()).unwrap(), EntryData { bytes: bin.clone(), truncated: false }, "{fmt:?}");
+        assert_eq!(read(&out, "data/hello.txt", pw, 0).unwrap(), EntryData { bytes: vec![], truncated: true }, "{fmt:?}");
+        assert_eq!(read(&out, "data/sub/empty.txt", pw, 0).unwrap(), EntryData { bytes: vec![], truncated: false }, "{fmt:?}");
+        // every listed file entry is readable by its listed name; directories are not
+        for e in list(&out, pw).unwrap() {
+            let r = read(&out, &e.name, pw, usize::MAX);
+            if e.is_dir {
+                assert!(matches!(r, Err(Error::NotFound(_))), "{fmt:?} {}: {r:?}", e.name);
+            } else {
+                assert_eq!(r.unwrap().bytes.len() as u64, e.size, "{fmt:?} {}", e.name);
+            }
+        }
+        for missing in ["data/nope.txt", "data/sub", "data/sub/", "data", "hello.txt"] {
+            assert!(matches!(read(&out, missing, pw, 10), Err(Error::NotFound(_))), "{fmt:?} {missing}");
+        }
+        let p = Progress { on: &|_, _, _| {}, cancel: Arc::new(AtomicBool::new(true)) };
+        assert!(matches!(read_entry(&out, "data/hello.txt", pw, 10, &p), Err(Error::Cancelled)), "{fmt:?}");
+    }
+
+    #[test] fn read_entry_zip() { read_entry_cases(Format::Zip, None) }
+    #[test] fn read_entry_zip_password() { read_entry_cases(Format::Zip, Some("s3cret")) }
+    #[test] fn read_entry_7z() { read_entry_cases(Format::SevenZ, None) }
+    #[test] fn read_entry_7z_password() { read_entry_cases(Format::SevenZ, Some("s3cret")) }
+    #[test] fn read_entry_tar() { read_entry_cases(Format::Tar, None) }
+    #[test] fn read_entry_tar_gz() { read_entry_cases(Format::TarGz, None) }
+    #[test] fn read_entry_tar_zst() { read_entry_cases(Format::TarZst, None) }
+
+    #[test]
+    fn read_entry_wrong_password() {
+        for fmt in [Format::Zip, Format::SevenZ] {
+            let t = tempfile::tempdir().unwrap();
+            let src = sample(t.path());
+            let out = t.path().join(format!("w.{}", fmt.extension()));
+            create(&out, &[src], &CreateOptions { format: fmt, level: None, password: Some("right".into()) }, &Progress::none()).unwrap();
+            assert!(read(&out, "data/hello.txt", Some("wrong"), 100).is_err(), "{fmt:?}");
+            assert!(read(&out, "data/hello.txt", None, 100).is_err(), "{fmt:?}");
+        }
+    }
+
+    #[test]
+    fn read_entry_7z_multi_block() {
+        // non-solid archive: one block per file, only the entry's block is decoded
+        let t = tempfile::tempdir().unwrap();
+        let out = t.path().join("m.7z");
+        let mut w = sevenz_rust2::ArchiveWriter::create(&out).unwrap();
+        let parts: Vec<(String, Vec<u8>)> = (0..4).map(|k| (format!("f{k}.txt"), format!("block {k} ").repeat(1000 * (k + 1)).into_bytes())).collect();
+        for (name, data) in &parts {
+            w.push_archive_entry(sevenz_rust2::ArchiveEntry::new_file(name), Some(data.as_slice())).unwrap();
+        }
+        w.finish().unwrap();
+        assert_eq!(sevenz_rust2::Archive::open(&out).unwrap().blocks.len(), 4);
+        for (name, data) in parts.iter().rev() {
+            assert_eq!(&read(&out, name, None, usize::MAX).unwrap().bytes, data);
+            let r = read(&out, name, None, 7).unwrap();
+            assert!(r.truncated && r.bytes == data[..7]);
+        }
+    }
+
+    #[test]
+    fn read_entry_single_files() {
+        for fmt in [Format::Gz, Format::Bz2, Format::Xz, Format::Zst] {
+            let t = tempfile::tempdir().unwrap();
+            let f = t.path().join("note.txt");
+            let data = b"single file payload ".repeat(500);
+            fs::write(&f, &data).unwrap();
+            let out = t.path().join(format!("note.txt.{}", fmt.extension()));
+            create(&out, &[f], &CreateOptions { format: fmt, level: None, password: None }, &Progress::none()).unwrap();
+            assert_eq!(read(&out, "note.txt", None, data.len()).unwrap(), EntryData { bytes: data.clone(), truncated: false }, "{fmt:?}");
+            let r = read(&out, "note.txt", None, 33).unwrap();
+            assert!(r.truncated && r.bytes == data[..33], "{fmt:?}");
+            assert_eq!(read(&out, "note.txt", None, 0).unwrap(), EntryData { bytes: vec![], truncated: true }, "{fmt:?}");
+            assert!(matches!(read(&out, "other.txt", None, 10), Err(Error::NotFound(_))), "{fmt:?}");
+        }
+    }
+
+    /// Many files of mixed sizes (0 B .. ~1.5 MiB) in nested folders.
+    fn mixed_tree(dir: &Path) -> PathBuf {
+        let root = dir.join("mix");
+        for k in 0..60usize {
+            let d = root.join(format!("d{}/e{}", k % 5, k % 3));
+            fs::create_dir_all(&d).unwrap();
+            let len = match k % 6 { 0 => 0, 1 => 17, 2 => 4096, 3 => 70_000, 4 => 300_000, _ => 1_500_000 } + k;
+            let data: Vec<u8> = (0..len).map(|i| ((i * 7 + k * 13) % 251) as u8 ^ (i >> 9) as u8).collect();
+            fs::write(d.join(format!("f{k}.bin")), data).unwrap();
+        }
+        fs::create_dir_all(root.join("empty/inner")).unwrap();
+        root
+    }
+
+    #[test]
+    fn zip_parallel_extraction() {
+        let t = tempfile::tempdir().unwrap();
+        let src = mixed_tree(t.path());
+        let out = t.path().join("m.zip");
+        create(&out, &[src.clone()], &CreateOptions { format: Format::Zip, level: Some(1), password: None }, &Progress::none()).unwrap();
+        for th in [1, 2, 4, 8] {
+            let dest = t.path().join(format!("all{th}"));
+            fs::create_dir_all(&dest).unwrap();
+            extract_zip(&out, &dest, None, None, th, &Progress::none()).unwrap();
+            assert_same(&src, &dest.join("mix"));
+            // subset: one folder plus one single file
+            let dest = t.path().join(format!("sub{th}"));
+            fs::create_dir_all(&dest).unwrap();
+            let sel = ["mix/d1".to_string(), "mix/d2/e2/f2.bin".to_string()];
+            extract_zip(&out, &dest, None, Some(&sel), th, &Progress::none()).unwrap();
+            assert_same(&src.join("d1"), &dest.join("mix/d1"));
+            assert_eq!(fs::read(dest.join("mix/d2/e2/f2.bin")).unwrap(), fs::read(src.join("d2/e2/f2.bin")).unwrap());
+            assert!(!dest.join("mix/d0").exists() && !dest.join("mix/d2/e0").exists() && !dest.join("mix/empty").exists());
+            // progress reaches the total once all bytes are written
+            let last = std::sync::Mutex::new((0, 0));
+            let on = |d, tot, _: &str| *last.lock().unwrap() = (d, tot);
+            let p = Progress { on: &on, cancel: Arc::new(AtomicBool::new(false)) };
+            let dest = t.path().join(format!("p{th}"));
+            fs::create_dir_all(&dest).unwrap();
+            extract_zip(&out, &dest, None, None, th, &p).unwrap();
+            let (d, tot) = *last.lock().unwrap();
+            assert!(d == tot && tot > 0, "{th}: {d}/{tot}");
+            // cancellation
+            let p = Progress { on: &|_, _, _| {}, cancel: Arc::new(AtomicBool::new(true)) };
+            assert!(matches!(extract_zip(&out, &dest, None, None, th, &p), Err(Error::Cancelled)));
+        }
+    }
+
+    #[test]
+    fn zip_parallel_wrong_password() {
+        let t = tempfile::tempdir().unwrap();
+        let src = mixed_tree(t.path());
+        let out = t.path().join("m.zip");
+        create(&out, &[src.clone()], &CreateOptions { format: Format::Zip, level: Some(1), password: Some("right".into()) }, &Progress::none()).unwrap();
+        for d in ["x", "y"] { fs::create_dir_all(t.path().join(d)).unwrap(); }
+        assert!(extract_zip(&out, &t.path().join("x"), Some("wrong"), None, 4, &Progress::none()).is_err());
+        extract_zip(&out, &t.path().join("y"), Some("right"), None, 4, &Progress::none()).unwrap();
+        assert_same(&src, &t.path().join("y/mix"));
+    }
+
+    #[test]
+    fn zip_partial_skips_unselected_encrypted() {
+        let t = tempfile::tempdir().unwrap();
+        let out = t.path().join("mixed.zip");
+        let mut z = zip::ZipWriter::new(File::create(&out).unwrap());
+        let opt = zip::write::SimpleFileOptions::default();
+        z.start_file("a.txt", opt.with_aes_encryption(zip::AesMode::Aes256, "pw1")).unwrap();
+        z.write_all(b"alpha").unwrap();
+        z.start_file("b.txt", opt.with_aes_encryption(zip::AesMode::Aes256, "other")).unwrap();
+        z.write_all(b"bravo").unwrap();
+        z.start_file("c.txt", opt).unwrap();
+        z.write_all(b"charlie").unwrap();
+        z.finish().unwrap();
+        let sel = ["a.txt".to_string(), "c.txt".to_string()];
+        for th in [1, 4] {
+            let dest = t.path().join(format!("x{th}"));
+            fs::create_dir_all(&dest).unwrap();
+            extract_zip(&out, &dest, Some("pw1"), Some(&sel), th, &Progress::none()).unwrap();
+            assert_eq!(fs::read(dest.join("a.txt")).unwrap(), b"alpha");
+            assert_eq!(fs::read(dest.join("c.txt")).unwrap(), b"charlie");
+            assert!(!dest.join("b.txt").exists());
+            let all = t.path().join(format!("all{th}"));
+            fs::create_dir_all(&all).unwrap();
+            assert!(extract_zip(&out, &all, Some("pw1"), None, th, &Progress::none()).is_err());
+        }
+        extract(&out, &t.path().join("e"), Some("pw1"), Some(&sel), &Progress::none()).unwrap();
+        assert_eq!(read(&out, "b.txt", Some("other"), 100).unwrap().bytes, b"bravo");
+        assert_eq!(read(&out, "c.txt", None, 100).unwrap().bytes, b"charlie");
+    }
+
+    #[test]
+    fn mtime_preserved() {
+        let when = std::time::SystemTime::now() - std::time::Duration::from_secs(3 * 86_400 + 1234);
+        for fmt in [Format::Zip, Format::SevenZ, Format::TarGz] {
+            let t = tempfile::tempdir().unwrap();
+            let src = sample(t.path());
+            for f in ["hello.txt", "sub/a.bin", "sub/empty.txt"] {
+                File::options().write(true).open(src.join(f)).unwrap().set_modified(when).unwrap();
+            }
+            let out = t.path().join(format!("t.{}", fmt.extension()));
+            create(&out, &[src], &CreateOptions { format: fmt, level: None, password: None }, &Progress::none()).unwrap();
+            let dest = t.path().join("x");
+            extract(&out, &dest, None, None, &Progress::none()).unwrap();
+            for f in ["hello.txt", "sub/a.bin", "sub/empty.txt"] {
+                let m = fs::metadata(dest.join("data").join(f)).unwrap().modified().unwrap();
+                let diff = m.duration_since(when).unwrap_or_else(|e| e.duration());
+                assert!(diff <= std::time::Duration::from_secs(2), "{fmt:?} {f}: off by {diff:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn sevenz_lists_encryption() {
+        for pw in [None, Some("s3cret")] {
+            let t = tempfile::tempdir().unwrap();
+            let src = sample(t.path());
+            let out = t.path().join("e.7z");
+            create(&out, &[src], &CreateOptions { format: Format::SevenZ, level: None, password: pw.map(String::from) }, &Progress::none()).unwrap();
+            let l = list(&out, pw).unwrap();
+            let hello = l.iter().find(|e| e.name.ends_with("hello.txt")).unwrap();
+            assert_eq!(hello.encrypted, pw.is_some());
+            assert!(l.iter().filter(|e| e.is_dir).all(|e| !e.encrypted));
+        }
     }
 
     #[test]
