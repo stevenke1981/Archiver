@@ -9,6 +9,7 @@ pub enum Action {
     Open(PathBuf),
     ExtractHere(Vec<PathBuf>),
     ExtractToFolder(Vec<PathBuf>),
+    ExtractTo(Vec<PathBuf>),
     Compress(Vec<PathBuf>),
     RegisterShell,
     UnregisterShell,
@@ -20,6 +21,7 @@ pub const USAGE: &str = "Usage: archiver [OPTION] [FILES...]
   --open <archive>                open archive in the GUI
   --extract-here <archives...>    extract next to each archive
   --extract-to-folder <archives...>  extract into <dir>/<archive name>/
+  --extract-to <archives...>      choose a destination folder for extraction
   --compress <files/folders...>   open the create-archive dialog prefilled
   --register-shell                install right-click menu integration (current user)
   --unregister-shell              remove right-click menu integration
@@ -41,6 +43,7 @@ where
         },
         Some("--extract-here") => need(rest(), "--extract-here").map(Action::ExtractHere),
         Some("--extract-to-folder") => need(rest(), "--extract-to-folder").map(Action::ExtractToFolder),
+        Some("--extract-to") => need(rest(), "--extract-to").map(Action::ExtractTo),
         Some("--compress") => need(rest(), "--compress").map(Action::Compress),
         Some("--register-shell") => Ok(Action::RegisterShell),
         Some("--unregister-shell") => Ok(Action::UnregisterShell),
@@ -66,6 +69,7 @@ mod tests {
         assert_eq!(parse(["--open", "a.7z"]), Ok(Action::Open("a.7z".into())));
         assert_eq!(parse(["--extract-here", "a.zip", "b c.rar"]), Ok(Action::ExtractHere(p(&["a.zip", "b c.rar"]))));
         assert_eq!(parse(["--extract-to-folder", "x.tar.gz"]), Ok(Action::ExtractToFolder(p(&["x.tar.gz"]))));
+        assert_eq!(parse(["--extract-to", "中文 資料.zip", "b c.rar"]), Ok(Action::ExtractTo(p(&["中文 資料.zip", "b c.rar"]))));
         assert_eq!(parse(["--compress", "d", "f.txt"]), Ok(Action::Compress(p(&["d", "f.txt"]))));
         assert_eq!(parse(["f1", "f2"]), Ok(Action::Compress(p(&["f1", "f2"]))));
         assert_eq!(parse(["--register-shell"]), Ok(Action::RegisterShell));
@@ -76,6 +80,8 @@ mod tests {
     #[test]
     fn errors() {
         assert!(parse(["--extract-here"]).is_err());
+        assert!(parse(["--extract-to"]).is_err());
+        assert!(parse(["--extract-to-folder"]).is_err());
         assert!(parse(["--compress"]).is_err());
         assert!(parse(["--open"]).is_err());
         assert!(parse(["--open", "a", "b"]).is_err());

@@ -17,6 +17,10 @@ Check (Test-Path 'HKCU:\Software\Classes\Archiver.archive\shell\open\command') "
 Check ((Get-ItemProperty 'HKCU:\Software\Classes\.7z\OpenWithProgids').PSObject.Properties.Name -contains 'Archiver.archive') ".7z OpenWithProgids"
 Check (Test-Path 'HKCU:\Software\Classes\Directory\shell\Archiver') "Explorer context menu registered"
 Check (Test-Path 'HKCU:\Software\Classes\SystemFileAssociations\.zip\shell\Archiver') "zip context menu registered"
+$extractToKey = 'HKCU:\Software\Classes\SystemFileAssociations\.zip\shell\Archiver\shell\05extractdest'
+# Keep this script ASCII so Windows PowerShell 5.1 can parse it without a UTF-8 BOM.
+Check ((Get-Item $extractToKey).GetValue('MUIVerb') -match '^\u89e3\u58d3\u7e2e\u81f3\u2026$') "choose-destination context menu label"
+Check ((Get-Item "$extractToKey\command").GetValue('') -eq "`"$dir\archiver.exe`" --extract-to `"%1`"") "choose-destination command targets installed binary"
 $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 Check ($userPath -like "*$dir*") "install dir on user PATH"
 Check (Test-Path (Join-Path ([Environment]::GetFolderPath('Programs')) 'Archiver.lnk')) "Start menu shortcut"
@@ -37,6 +41,7 @@ Start-Sleep -Seconds 3   # uninstaller deletes itself via a helper process
 Check (-not (Test-Path (Join-Path $dir 'archiver.exe'))) "archiver.exe removed"
 Check (-not (Test-Path 'HKCU:\Software\Classes\Archiver.archive')) "ProgID removed"
 Check (-not (Test-Path 'HKCU:\Software\Classes\Directory\shell\Archiver')) "context menu removed"
+Check (-not (Test-Path $extractToKey)) "choose-destination context menu removed"
 $po = Get-ItemProperty 'HKCU:\Software\Classes\.7z\OpenWithProgids' -ErrorAction SilentlyContinue
 Check (-not ($po -and ($po.PSObject.Properties.Name -contains 'Archiver.archive'))) ".7z OpenWithProgids entry removed"
 $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
