@@ -1,13 +1,26 @@
 # Builds dist\archiver-setup-windows-x64.exe with Inno Setup.
 # Expects target\release\archiver.exe and rarc.exe to exist already.
+param([string]$IsccPath)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 
-$iscc = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
-if (-not (Test-Path $iscc)) {
+$iscc = $IsccPath
+if (-not $iscc) {
+    $iscc = @(
+        (Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'),
+        (Join-Path $env:ProgramFiles 'Inno Setup 6\ISCC.exe'),
+        (Join-Path $env:ProgramFiles 'Inno Setup 7\ISCC.exe')
+    ) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+    if (-not $iscc) {
+        $iscc = (Get-Command ISCC.exe -ErrorAction SilentlyContinue | Select-Object -First 1).Source
+    }
+}
+if ($IsccPath -and -not (Test-Path -LiteralPath $iscc)) { throw "ISCC.exe not found at $iscc" }
+if (-not $iscc) {
     choco install innosetup -y --no-progress
     if ($LASTEXITCODE -ne 0) { throw "choco install innosetup failed" }
+    $iscc = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
 }
 if (-not (Test-Path $iscc)) { throw "ISCC.exe not found at $iscc" }
 

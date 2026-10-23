@@ -55,6 +55,7 @@ jobs:
           fi
           case "$RUNNER_OS" in
             Windows) reg query 'HKCU\Software\Classes\SystemFileAssociations\.zip\shell\Archiver\shell\02extracthere\command' /ve
+                     reg query 'HKCU\Software\Classes\SystemFileAssociations\.zip\shell\Archiver\shell\05extractdest\command' /ve
                      reg query 'HKCU\Software\Classes\Directory\shell\Archiver' ;;
             macOS)   ls -R ~/Library/Services | grep "Archiver - "
                      plutil -lint ~/Library/Services/Archiver\ -\ *.workflow/Contents/Info.plist ~/Library/Services/Archiver\ -\ *.workflow/Contents/document.wflow ;;

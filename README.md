@@ -31,6 +31,12 @@
 - 分批解壓縮：選取多個壓縮檔後「解壓縮到」會分別解到目標資料夾下各自的子資料夾；「指令 → 解壓縮到這裡」「分別解壓縮到各自資料夾」可一次處理多個壓縮檔
 - 某個項目失敗不會中斷整批，完成後顯示摘要（成功／失敗數與錯誤原因）；取消則停止其餘項目
 
+### 指定目的地與選取項目解壓縮（v0.6.1 起）
+
+- 檔案總管選取壓縮檔後，右鍵 → Archiver →「解壓縮至…」，可自行挑選輸出資料夾；取消選擇不會解壓縮。更新程式後請重新啟用「選項 → 右鍵選單整合…」，或執行 `archiver --register-shell`
+- 在 Archiver 開啟壓縮檔後，點選要解壓縮的檔案或資料夾（Ctrl/Shift 可多選），使用「解壓縮選取項目…」，或在選取項目上按右鍵 →「解壓縮至…」。只輸出選取項目，並保留壓縮檔內的目錄結構；選取資料夾會包含其內容
+- 右鍵點已選取的項目會保留多選；點未選取的項目會改選該項。需要整份壓縮檔時，使用「解壓縮全部…」；未選取項目時，選取項目解壓縮不會改成全部解壓縮
+
 ### 一般
 
 - 開啟壓縮檔並列出內容（名稱、大小、壓縮後大小、修改時間），支援搜尋過濾
@@ -45,7 +51,7 @@
 
 ## 右鍵選單整合
 
-在 GUI 按「⚙ 右鍵選單 Shell menu」勾選啟用，或在終端機執行：
+在 GUI 按「選項 → 右鍵選單整合…」勾選啟用，或在終端機執行：
 
 ```bash
 archiver --register-shell     # 安裝（僅目前使用者，不需系統管理員）
@@ -58,9 +64,9 @@ archiver --unregister-shell   # 移除
 
 | 系統 | 安裝內容 | 選單項目 |
 |---|---|---|
-| Windows | `HKCU\Software\Classes` 下的串接子選單：壓縮檔（`SystemFileAssociations\.zip` 等）、所有檔案（`*`）、資料夾（`Directory`） | 壓縮檔：開啟、解壓到這裡、解壓到資料夾\、加入壓縮檔…；其他檔案與資料夾：加入壓縮檔… |
+| Windows | `HKCU\Software\Classes` 下的串接子選單：壓縮檔（`SystemFileAssociations\.zip` 等）、所有檔案（`*`）、資料夾（`Directory`） | 壓縮檔：開啟、解壓到這裡、解壓到資料夾\、解壓縮至…（自選目的地）、加入壓縮檔…；其他檔案與資料夾：加入壓縮檔… |
 | Linux | `~/.local/share/applications/archiver.desktop`（MIME 關聯 → 「以其他程式開啟」）、Nautilus 腳本（右鍵 → 腳本 → Archiver）、Dolphin 服務選單（KF6 `kio/servicemenus` 與 KF5 `kservices5/ServiceMenus`）、Nemo actions | 同上 |
-| macOS | `~/Library/Services/Archiver - *.workflow` 四個快速動作 | Finder 右鍵 → 快速動作（或「服務」）→ Archiver - … |
+| macOS | `~/Library/Services/Archiver - *.workflow` 五個快速動作 | Finder 右鍵 → 快速動作（或「服務」）→ Archiver - … |
 
 macOS：若快速動作沒有出現，到「系統設定 → 一般 → 登入項目與延伸功能 → Finder（或 鍵盤 → 鍵盤快速鍵 → 服務）」勾選。建議先把 `Archiver.app` 放到「應用程式」資料夾再註冊。
 
@@ -71,6 +77,7 @@ archiver <壓縮檔>                     開啟
 archiver --open <壓縮檔>
 archiver --extract-here <壓縮檔...>     解壓到壓縮檔所在資料夾，成功後自動關閉
 archiver --extract-to-folder <壓縮檔...> 解壓到「壓縮檔名稱」子資料夾
+archiver --extract-to <壓縮檔...>       開啟資料夾選擇視窗，解壓縮至指定目的地
 archiver --compress <檔案/資料夾...>     開啟建立壓縮檔視窗並預先填入
 ```
 
@@ -180,7 +187,9 @@ A small CLI (`rarc`) is included.
 **Context-menu integration** (`archiver --register-shell`, `--unregister-shell`, or the "⚙ Shell menu" toggle in the GUI; current user only, no admin):
 Windows Explorer cascading "Archiver" submenu via HKCU registry (Open / Extract here / Extract to folder\ / Add to archive… for archives; Add to archive… for other files and folders);
 Linux `.desktop` MIME associations plus Nautilus scripts, Dolphin service menus and Nemo actions;
-macOS Finder Quick Actions in `~/Library/Services`. The app accepts `--open`, `--extract-here`, `--extract-to-folder` and `--compress` with multiple files.
+macOS Finder Quick Actions in `~/Library/Services`. The app accepts `--open`, `--extract-here`, `--extract-to-folder`, `--extract-to` (choose a destination) and `--compress` with multiple files.
+
+**Selective extraction:** right-click a file or folder in the archive manager and choose "解壓縮至…", or use "解壓縮選取項目…". Ctrl/Shift multi-selection is preserved when right-clicking a selected row. Empty selection never falls back to extracting the entire archive; use "解壓縮全部…" for that.
 The macOS release ships a universal (arm64 + x86_64) `Archiver.app` with archive document types declared. Limitations: Windows launches one process per selected file; macOS "Open With" launches the app but the file is not loaded (Apple Events are not exposed by eframe) — use the Quick Actions or drag-and-drop. Prebuilt binaries are on the Releases page.
 
 **Preview & copy (v0.6.0):** a live preview pane shows the selected entry without extracting it (text up to 256 KiB, PNG/JPEG/SVG images, hex dump otherwise, folder summaries); Copy / Ctrl+C puts the selected entries on the system clipboard as files, ready to paste into Explorer/Finder/file managers. **Batch (v0.6.0):** compress each selected file/folder into its own archive (unique names), extract many archives at once (here, into per-archive folders, or into a chosen folder); failures do not stop the batch and a summary is shown. CLI: `rarc ce` / `rarc xe`. Parallel ZIP extraction, partial ZIP extraction never opens unselected entries, ZIP/7z modification times are restored. New keys: arrows, Ctrl+C, Ctrl+F, F3, F5.
