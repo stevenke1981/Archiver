@@ -206,6 +206,7 @@ fn main() -> Result<(), slint::PlatformError> {
         Action::Compress(files) => open_create(&ui, &st, files, None),
         Action::ExtractHere(files) => extract_batch(&ui, &st, files, false),
         Action::ExtractToFolder(files) => extract_batch(&ui, &st, files, true),
+        Action::ExtractTo(files) => extract_to(&ui, &st, files),
         _ => {}
     }
     ui.run()?;
@@ -294,6 +295,7 @@ fn push_rows(ui: &AppWindow, st: &S) {
 }
 
 fn update_status(ui: &AppWindow, s: &State) {
+    ui.set_can_extract_selection(view::can_extract_selection(matches!(s.mode, Mode::Archive { .. }), &s.items, &s.selected));
     let files: Vec<&Item> = s.items.iter().filter(|i| !i.is_dir).collect();
     let total: u64 = files.iter().filter_map(|i| i.size).sum();
     let dirs = s.items.iter().filter(|i| i.is_dir && !i.is_parent).count();
@@ -542,6 +544,24 @@ fn extract_batch(ui: &AppWindow, st: &S, files: Vec<PathBuf>, to_folder: bool) {
     spawn(ui, st, "解壓縮中…", move |p| batch_msg(&archiver_core::extract_each(&files, &dest, None, p)));
 }
 
+/// Shell command: let the user choose a destination; one archive goes directly into it,
+/// multiple archives keep the manager's existing per-archive folder behavior.
+fn extract_to(ui: &AppWindow, st: &S, files: Vec<PathBuf>) {
+    if is_busy(ui, st) || files.is_empty() {
+        return;
+    }
+    let start = files[0].parent().unwrap_or(Path::new(""));
+    let Some(dest) = rfd::FileDialog::new().set_title("解壓縮至…").set_directory(start).pick_folder() else { return };
+    {
+        let mut s = st.borrow_mut();
+        s.close_when_done = true;
+        if files.len() == 1 {
+            s.fallback_open = Some(files[0].clone());
+        }
+    }
+    extract_into(ui, st, files, None, None, dest);
+}
+
 fn is_password_err(e: &str) -> bool {
     e.to_lowercase().contains("password")
 }
@@ -684,7 +704,9 @@ fn do_action(ui: &AppWindow, st: &S, a: &str) {
         }
         "add" => do_add(ui, st, None),
         "add-each" => do_add(ui, st, Some(true)),
-        "extract" => do_extract(ui, st),
+        "extract" => do_extract(ui, st, ExtractScope::Automatic),
+        "extract-selected" => do_extract(ui, st, ExtractScope::Selected),
+        "extract-all" => do_extract(ui, st, ExtractScope::All),
         "extract-here" => do_extract_each(ui, st, BatchDest::Beside),
         "extract-each" => do_extract_each(ui, st, BatchDest::BesideInFolder),
         "copy" => do_copy(ui, st),
@@ -731,7 +753,7 @@ fn do_action(ui: &AppWindow, st: &S, a: &str) {
         }
         "wizard" => {
             if matches!(st.borrow().mode, Mode::Archive { .. }) {
-                do_extract(ui, st);
+                do_extract(ui, st, ExtractScope::All);
             } else {
                 do_action(ui, st, "add");
             }
@@ -743,7 +765,7 @@ fn do_action(ui: &AppWindow, st: &S, a: &str) {
         "shell" => {
             ui.set_shell_enabled(shell::is_registered());
             let d = if cfg!(windows) {
-                "Windows 檔案總管右鍵選單（目前使用者 HKCU，不需系統管理員）：開啟、解壓縮到這裡、解壓縮到資料夾、加入壓縮檔。"
+                "Windows 檔案總管右鍵選單（目前使用者 HKCU，不需系統管理員）：開啟、解壓縮至…（選擇目的地）、解壓縮到這裡、解壓縮到資料夾、加入壓縮檔。"
             } else if cfg!(target_os = "macos") {
                 "Finder 快速動作（~/Library/Services）。"
             } else {
@@ -908,13 +930,41 @@ fn view_item(ui: &AppWindow, st: &S, it: Item) {
     });
 }
 
-fn do_extract(ui: &AppWindow, st: &S) {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ExtractScope {
+    Automatic,
+    Selected,
+    All,
+}
+
+fn extraction_names(items: &[Item], scope: ExtractScope) -> Result<Option<Vec<String>>, &'static str> {
+    let names: Vec<String> = items.iter().filter(|i| !i.is_parent).map(|i| i.full.clone()).collect();
+    match scope {
+        ExtractScope::Selected if names.is_empty() => Err("請先選取要解壓縮的檔案或資料夾"),
+        ExtractScope::All => Ok(None),
+        _ => Ok((!names.is_empty()).then_some(names)),
+    }
+}
+
+fn do_extract(ui: &AppWindow, st: &S, scope: ExtractScope) {
+    if is_busy(ui, st) {
+        return;
+    }
+    if scope == ExtractScope::Selected && !ui.get_can_extract_selection() {
+        return set_status(ui, st, "請先選取要解壓縮的檔案或資料夾；檔案系統中請只選取壓縮檔");
+    }
     let (sources, sel, start, pw): (Vec<PathBuf>, Option<Vec<String>>, PathBuf, Option<String>) = {
         let s = st.borrow();
         let sel = selected_items(&s);
         match &s.mode {
             Mode::Archive { path, .. } => {
-                let names = (!sel.is_empty()).then(|| sel.iter().map(|i| i.full.clone()).collect());
+                let names = match extraction_names(&sel, scope) {
+                    Ok(names) => names,
+                    Err(message) => {
+                        drop(s);
+                        return set_status(ui, st, message);
+                    }
+                };
                 (vec![path.clone()], names, path.parent().map(Path::to_path_buf).unwrap_or_default(), opt_pw(&s))
             }
             Mode::Fs(dir) => {
@@ -929,7 +979,12 @@ fn do_extract(ui: &AppWindow, st: &S) {
             open_archive(ui, st, p);
         };
     }
-    let Some(dest) = rfd::FileDialog::new().set_title("解壓縮到").set_directory(&start).pick_folder() else { return };
+    let title = if sel.is_some() { "解壓縮選取項目至…" } else { "解壓縮至…" };
+    let Some(dest) = rfd::FileDialog::new().set_title(title).set_directory(&start).pick_folder() else { return };
+    extract_into(ui, st, sources, sel, pw, dest);
+}
+
+fn extract_into(ui: &AppWindow, st: &S, sources: Vec<PathBuf>, sel: Option<Vec<String>>, pw: Option<String>, dest: PathBuf) {
     if sources.len() > 1 {
         let dest = BatchDest::IntoFolders(dest);
         return spawn(ui, st, "解壓縮中…", move |p| batch_msg(&archiver_core::extract_each(&sources, &dest, pw.as_deref(), p)));
@@ -1397,6 +1452,27 @@ fn wire_callbacks(ui: &AppWindow, st: &S) {
     }
     {
         let (w, st) = (ui.as_weak(), st.clone());
+        ui.on_row_context_requested(move |i| {
+            let Some(ui) = w.upgrade() else { return false };
+            if i < 0 || is_busy(&ui, &st) {
+                return false;
+            }
+            {
+                let mut s = st.borrow_mut();
+                let State { items, selected, .. } = &mut *s;
+                if !view::select_context_item(items, selected, i as usize) {
+                    return false;
+                }
+                s.anchor = Some(i as usize);
+                s.status.clear();
+            }
+            sync_selection(&ui, &st);
+            selection_changed(&ui, &st);
+            ui.get_can_extract_selection()
+        });
+    }
+    {
+        let (w, st) = (ui.as_weak(), st.clone());
         ui.on_row_double_clicked(move |i| {
             if let Some(ui) = w.upgrade() {
                 activate(&ui, &st, i as usize);
@@ -1514,6 +1590,57 @@ mod tests {
 
     fn r(input: &str, result: archiver_core::Result<()>) -> BatchResult {
         BatchResult { input: PathBuf::from(input), output: PathBuf::from("out"), result }
+    }
+
+    #[test]
+    fn selected_extraction_never_falls_back_to_all() {
+        assert!(extraction_names(&[], ExtractScope::Selected).is_err());
+        assert!(extraction_names(&[Item::parent()], ExtractScope::Selected).is_err());
+        assert_eq!(extraction_names(&[], ExtractScope::All), Ok(None));
+        let item = Item { name: "chosen.txt".into(), full: "folder/chosen.txt".into(), is_dir: false, is_parent: false, size: None, packed: None, modified: String::new(), crc: None };
+        assert_eq!(extraction_names(std::slice::from_ref(&item), ExtractScope::Selected), Ok(Some(vec!["folder/chosen.txt".into()])));
+        assert_eq!(extraction_names(std::slice::from_ref(&item), ExtractScope::All), Ok(None));
+    }
+
+    #[test]
+    fn manager_selection_extracts_only_chosen_files_and_folder_descendants() {
+        let t = tempfile::tempdir().unwrap();
+        let src = t.path().join("data");
+        std::fs::create_dir_all(src.join("folder/nested")).unwrap();
+        std::fs::write(src.join("folder/chosen.txt"), b"chosen").unwrap();
+        std::fs::write(src.join("folder/skip.txt"), b"skip").unwrap();
+        std::fs::write(src.join("folder/nested/中文.txt"), b"nested").unwrap();
+        std::fs::write(src.join("other.txt"), b"other").unwrap();
+        let archive = t.path().join("selection.zip");
+        let options = CreateOptions { format: Format::Zip, level: None, password: None };
+        archiver_core::create(&archive, &[src], &options, &Progress::none()).unwrap();
+        let entries = archiver_core::list(&archive, None).unwrap();
+
+        let mut rows = view::archive_children(&entries, "data/folder/");
+        view::sort_items(&mut rows, 0, false);
+        let chosen: Vec<Item> = rows.into_iter().filter(|i| i.name == "chosen.txt").collect();
+        let names = extraction_names(&chosen, ExtractScope::Selected).unwrap().unwrap();
+        let out = t.path().join("single");
+        archiver_core::extract(&archive, &out, None, Some(&names), &Progress::none()).unwrap();
+        assert_eq!(std::fs::read(out.join("data/folder/chosen.txt")).unwrap(), b"chosen");
+        assert!(!out.join("data/folder/skip.txt").exists());
+        assert!(!out.join("data/other.txt").exists());
+
+        let results = view::archive_search(&entries, "中文");
+        let names = extraction_names(&results, ExtractScope::Selected).unwrap().unwrap();
+        let out = t.path().join("search");
+        archiver_core::extract(&archive, &out, None, Some(&names), &Progress::none()).unwrap();
+        assert_eq!(std::fs::read(out.join("data/folder/nested/中文.txt")).unwrap(), b"nested");
+        assert!(!out.join("data/folder/chosen.txt").exists());
+
+        let folder: Vec<Item> = view::archive_children(&entries, "data/").into_iter().filter(|i| i.name == "folder").collect();
+        let names = extraction_names(&folder, ExtractScope::Selected).unwrap().unwrap();
+        let out = t.path().join("folder");
+        archiver_core::extract(&archive, &out, None, Some(&names), &Progress::none()).unwrap();
+        assert!(out.join("data/folder/chosen.txt").is_file());
+        assert!(out.join("data/folder/skip.txt").is_file());
+        assert!(out.join("data/folder/nested/中文.txt").is_file());
+        assert!(!out.join("data/other.txt").exists());
     }
 
     #[test]

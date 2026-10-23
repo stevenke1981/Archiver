@@ -101,6 +101,7 @@ export component AppWindow inherits Window {
     in property <string> status-right;
     in property <bool> archive-open;
     in property <bool> can-delete;
+    in property <bool> can-extract-selection;
     in property <int> sort-column: 0;
     in property <bool> sort-ascending: true;
 
@@ -141,6 +142,7 @@ export component AppWindow inherits Window {
     callback action(string);
     callback row-clicked(int, bool, bool);
     callback row-double-clicked(int);
+    callback row-context-requested(int) -> bool;
     callback sort(int);
     callback format-changed(int);
     callback shell-toggled(bool);
@@ -178,7 +180,9 @@ export component AppWindow inherits Window {
             MenuItem { title: "加入檔案到壓縮檔"; activated => { root.action("add"); } }
             MenuItem { title: "分批壓縮（各自建立壓縮檔）…"; activated => { root.action("add-each"); } }
             MenuSeparator { }
-            MenuItem { title: "解壓縮到指定資料夾"; activated => { root.action("extract"); } }
+            if !root.archive-open: MenuItem { title: "解壓縮至…"; enabled: !root.busy; activated => { root.action("extract"); } }
+            MenuItem { title: "解壓縮選取項目…"; enabled: root.can-extract-selection && !root.busy; activated => { root.action("extract-selected"); } }
+            MenuItem { title: "解壓縮全部…"; enabled: root.archive-open && !root.busy; activated => { root.action("extract-all"); } }
             MenuItem { title: "解壓縮到這裡"; activated => { root.action("extract-here"); } }
             MenuItem { title: "分別解壓縮到各自資料夾"; activated => { root.action("extract-each"); } }
             MenuSeparator { }
@@ -222,7 +226,12 @@ export component AppWindow inherits Window {
                 spacing: 2px;
                 alignment: start;
                 ToolButton { icon: @image-url("icons/add.svg"); label: "加入"; clicked => { root.action("add"); } }
-                ToolButton { icon: @image-url("icons/extract.svg"); label: "解壓縮到"; clicked => { root.action("extract"); } }
+                ToolButton {
+                    icon: @image-url("icons/extract.svg");
+                    label: root.archive-open ? "解壓選取" : "解壓縮至";
+                    enabled: !root.busy && (!root.archive-open || root.can-extract-selection);
+                    clicked => { root.action(root.archive-open ? "extract-selected" : "extract"); }
+                }
                 ToolButton { icon: @image-url("icons/test.svg"); label: "測試"; clicked => { root.action("test"); } }
                 ToolButton { icon: @image-url("icons/view.svg"); label: "檢視"; clicked => { root.action("view"); } }
                 ToolButton { icon: @image-url("icons/copy.svg"); label: "複製"; clicked => { root.action("copy"); } }
@@ -297,6 +306,10 @@ export component AppWindow inherits Window {
                 fs := FocusScope {
                     vertical-stretch: 1;
                     key-pressed(event) => {
+                        if (event.text == Key.Menu || (event.modifiers.shift && event.text == Key.F10)) {
+                            if (root.can-extract-selection && !root.busy) { extract-menu.show({ x: 8px, y: 8px }); }
+                            return accept;
+                        }
                         if (event.text == Key.Return) { root.key("enter"); return accept; }
                         if (event.text == Key.Backspace) { root.key("up"); return accept; }
                         if (event.text == Key.Delete) { root.key("delete"); return accept; }
@@ -308,6 +321,19 @@ export component AppWindow inherits Window {
                         if (event.modifiers.control && (event.text == "c" || event.text == "C")) { root.action("copy"); return accept; }
                         if (event.modifiers.control && (event.text == "f" || event.text == "F")) { root.action("find"); return accept; }
                         reject
+                    }
+                    // Open explicitly after the row callback has established the selection.
+                    // A zero-size area avoids treating empty list space as an entry.
+                    extract-menu := ContextMenuArea {
+                        width: 0px;
+                        height: 0px;
+                        Menu {
+                            MenuItem {
+                                title: "解壓縮至…";
+                                enabled: root.can-extract-selection && !root.busy;
+                                activated => { root.action("extract-selected"); fs.focus(); }
+                            }
+                        }
                     }
                     lv := ListView {
                         for row[i] in root.rows: Rectangle {
@@ -345,6 +371,12 @@ export component AppWindow inherits Window {
                                     if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.left) {
                                         fs.focus();
                                         root.row-clicked(i, ev.modifiers.control || ev.modifiers.meta, ev.modifiers.shift);
+                                    }
+                                    if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.right) {
+                                        fs.focus();
+                                        if (root.row-context-requested(i)) {
+                                            extract-menu.show({ x: self.mouse-x, y: i * root.row-height + lv.content-y + self.mouse-y });
+                                        }
                                     }
                                 }
                                 double-clicked => { root.row-double-clicked(i); }

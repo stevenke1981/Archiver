@@ -26,6 +26,33 @@ impl Item {
     }
 }
 
+/// Right-click keeps an existing multi-selection, or selects only the clicked row.
+/// Parent rows and stale row indices are never an extraction target.
+pub fn select_context_item(items: &[Item], selected: &mut [bool], index: usize) -> bool {
+    if index >= items.len() || index >= selected.len() || items[index].is_parent {
+        return false;
+    }
+    if !selected[index] {
+        selected.fill(false);
+        selected[index] = true;
+    }
+    true
+}
+
+pub fn can_extract_selection(in_archive: bool, items: &[Item], selected: &[bool]) -> bool {
+    let mut any = false;
+    for (item, &sel) in items.iter().zip(selected) {
+        if !sel || item.is_parent {
+            continue;
+        }
+        any = true;
+        if !in_archive && (item.is_dir || archiver_core::Format::detect(Path::new(&item.full)).is_none()) {
+            return false;
+        }
+    }
+    any
+}
+
 /// Immediate children of `prefix` ("" or "a/b/") in a flat archive listing.
 /// Folders that exist only implicitly (as path prefixes) are synthesised.
 pub fn archive_children(entries: &[Entry], prefix: &str) -> Vec<Item> {
@@ -377,6 +404,30 @@ mod tests {
 
     fn arch_item(full: &str, is_dir: bool) -> Item {
         Item { name: full.rsplit('/').next().unwrap_or(full).into(), full: full.into(), is_dir, is_parent: false, size: None, packed: None, modified: String::new(), crc: None }
+    }
+
+    #[test]
+    fn context_selection_preserves_multi_selection_and_retargets_unselected_rows() {
+        let items = vec![Item::parent(), arch_item("one.txt", false), arch_item("two.txt", false), arch_item("three.txt", false)];
+        let mut selected = vec![false, true, true, false];
+        assert!(select_context_item(&items, &mut selected, 2));
+        assert_eq!(selected, [false, true, true, false]);
+        assert!(select_context_item(&items, &mut selected, 3));
+        assert_eq!(selected, [false, false, false, true]);
+        assert!(!select_context_item(&items, &mut selected, 0));
+        assert!(!select_context_item(&items, &mut selected, 99));
+        assert_eq!(selected, [false, false, false, true]);
+    }
+
+    #[test]
+    fn extraction_selection_rejects_parent_empty_and_non_archive_filesystem_items() {
+        let items = vec![Item::parent(), arch_item("one.zip", false), arch_item("nested/two.txt", false), arch_item("folder", true)];
+        assert!(!can_extract_selection(true, &items, &[false; 4]));
+        assert!(!can_extract_selection(true, &items, &[true, false, false, false]));
+        assert!(can_extract_selection(true, &items, &[false, false, true, true]));
+        assert!(can_extract_selection(false, &items, &[false, true, false, false]));
+        assert!(!can_extract_selection(false, &items, &[false, true, true, false]));
+        assert!(!can_extract_selection(false, &items, &[false, false, false, true]));
     }
 
     #[test]
