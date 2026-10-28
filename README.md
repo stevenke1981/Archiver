@@ -2,6 +2,8 @@
 
 跨平台（Windows / Linux / macOS）的壓縮／解壓縮工具，介面仿 WinRAR 主視窗。核心與 GUI 皆以 Rust 撰寫（GUI 使用 [Slint](https://slint.dev/)，軟體繪製器，不需 GPU）。
 
+程式結構：`core/src` 將壓縮檔的列舉、解壓與驗證放在 `archive_ops.rs`，建立壓縮檔放在 `create.rs`，分批作業與預覽各有獨立模組；`gui/src` 則依清單、背景工作、操作、剪貼簿、預覽、事件接線與系統操作拆分。核心對外 API 仍由 `archiver-core` 匯出。
+
 ![screenshot](docs/screenshot.png)
 
 ## 功能
