@@ -459,3 +459,122 @@ use super::*;
         assert!(safe_join(Path::new("/d"), "/abs").is_none());
         assert_eq!(safe_join(Path::new("/d"), "a/b").unwrap(), Path::new("/d/a/b"));
     }
+
+    fn names(a: &Path, pw: Option<&str>) -> Vec<String> {
+        list(a, pw).unwrap().into_iter().map(|e| e.name).collect()
+    }
+
+    #[test]
+    fn zip_comment_roundtrip() {
+        let t = tempfile::tempdir().unwrap();
+        let src = sample(t.path());
+        let out = t.path().join("c.zip");
+        create(&out, &[src.clone()], &CreateOptions { format: Format::Zip, level: None, password: None }, &Progress::none()).unwrap();
+        assert_eq!(read_comment(&out).unwrap(), None);
+        set_comment(&out, "第一個備註 long long long long long comment", &Progress::none()).unwrap();
+        assert_eq!(read_comment(&out).unwrap().as_deref(), Some("第一個備註 long long long long long comment"));
+        // shrinking must not leave trailing bytes behind
+        set_comment(&out, "x", &Progress::none()).unwrap();
+        assert_eq!(read_comment(&out).unwrap().as_deref(), Some("x"));
+        assert_eq!(test(&out, None, &Progress::none()).unwrap(), 4);
+        set_comment(&out, "", &Progress::none()).unwrap();
+        assert_eq!(read_comment(&out).unwrap(), None);
+        let dest = t.path().join("x");
+        extract(&out, &dest, None, None, &Progress::none()).unwrap();
+        assert_same(&src, &dest.join("data"));
+        // other formats: no comment, set is unsupported
+        let tg = t.path().join("c.tar.gz");
+        create(&tg, &[src], &CreateOptions { format: Format::TarGz, level: None, password: None }, &Progress::none()).unwrap();
+        assert_eq!(read_comment(&tg).unwrap(), None);
+        assert!(matches!(set_comment(&tg, "x", &Progress::none()), Err(Error::Unsupported(_))));
+    }
+
+    #[test]
+    fn add_into_root_and_prefix_all_formats() {
+        for fmt in [Format::Zip, Format::SevenZ, Format::Tar, Format::TarGz, Format::TarZst] {
+            let t = tempfile::tempdir().unwrap();
+            let src = sample(t.path());
+            let out = t.path().join(format!("a.{}", fmt.extension()));
+            let opts = CreateOptions { format: fmt, level: None, password: None };
+            create(&out, &[src], &opts, &Progress::none()).unwrap();
+            let extra = t.path().join("extra");
+            fs::create_dir_all(extra.join("inner")).unwrap();
+            fs::write(extra.join("new.txt"), b"new file").unwrap();
+            fs::write(extra.join("inner/n2.txt"), b"nested").unwrap();
+            let single = t.path().join("single.txt");
+            fs::write(&single, b"single").unwrap();
+
+            add(&out, &[single.clone()], "", &opts, &Progress::none()).unwrap();
+            add(&out, &[extra.clone()], "data/sub", &opts, &Progress::none()).unwrap();
+            let n = names(&out, None);
+            let has = |s: &str| n.iter().any(|x| x.trim_end_matches('/') == s);
+            assert!(has("single.txt"), "{fmt:?} {n:?}");
+            assert!(has("data/sub/extra/new.txt"), "{fmt:?} {n:?}");
+            assert!(has("data/sub/extra/inner/n2.txt"), "{fmt:?} {n:?}");
+            assert!(has("data/hello.txt"), "{fmt:?} {n:?}");
+            assert_eq!(test(&out, None, &Progress::none()).unwrap(), 4 + 3, "{fmt:?}");
+            let dest = t.path().join("x");
+            extract(&out, &dest, None, None, &Progress::none()).unwrap();
+            assert_eq!(fs::read(dest.join("single.txt")).unwrap(), b"single");
+            assert_eq!(fs::read(dest.join("data/sub/extra/inner/n2.txt")).unwrap(), b"nested");
+            assert_eq!(fs::read(dest.join("data/sub/a.bin")).unwrap().len(), 50_000);
+            assert!(!t.path().join(format!("a.{}.add.tmp", fmt.extension())).exists());
+        }
+    }
+
+    #[test]
+    fn add_same_name_replaces_and_keeps_comment() {
+        let t = tempfile::tempdir().unwrap();
+        let f = t.path().join("a.txt");
+        fs::write(&f, b"old").unwrap();
+        let out = t.path().join("r.zip");
+        let opts = CreateOptions { format: Format::Zip, level: None, password: None };
+        create(&out, &[f.clone()], &opts, &Progress::none()).unwrap();
+        set_comment(&out, "keep me", &Progress::none()).unwrap();
+        fs::write(&f, b"newer content").unwrap();
+        add(&out, &[f], "", &opts, &Progress::none()).unwrap();
+        assert_eq!(names(&out, None), vec!["a.txt".to_string()]);
+        assert_eq!(read_comment(&out).unwrap().as_deref(), Some("keep me"));
+        let dest = t.path().join("x");
+        extract(&out, &dest, None, None, &Progress::none()).unwrap();
+        assert_eq!(fs::read(dest.join("a.txt")).unwrap(), b"newer content");
+    }
+
+    #[test]
+    fn add_encrypted_zip_and_7z() {
+        for fmt in [Format::Zip, Format::SevenZ] {
+            let t = tempfile::tempdir().unwrap();
+            let src = sample(t.path());
+            let out = t.path().join(format!("e.{}", fmt.extension()));
+            let opts = CreateOptions { format: fmt, level: None, password: Some("pw1".into()) };
+            create(&out, &[src], &opts, &Progress::none()).unwrap();
+            let f = t.path().join("added.txt");
+            fs::write(&f, b"secret add").unwrap();
+            add(&out, &[f], "data", &opts, &Progress::none()).unwrap();
+            let l = list(&out, Some("pw1")).unwrap();
+            let e = l.iter().find(|e| e.name == "data/added.txt").unwrap_or_else(|| panic!("{fmt:?} {l:?}"));
+            assert!(e.encrypted, "{fmt:?}");
+            let dest = t.path().join("x");
+            extract(&out, &dest, Some("pw1"), None, &Progress::none()).unwrap();
+            assert_eq!(fs::read(dest.join("data/added.txt")).unwrap(), b"secret add");
+            assert_eq!(fs::read(dest.join("data/hello.txt")).unwrap().len(), 1200);
+        }
+    }
+
+    #[test]
+    fn add_unsupported_formats() {
+        let t = tempfile::tempdir().unwrap();
+        let f = t.path().join("a.txt");
+        fs::write(&f, b"x").unwrap();
+        let opts = CreateOptions { format: Format::Gz, level: None, password: None };
+        let gz = t.path().join("a.txt.gz");
+        create(&gz, &[f.clone()], &opts, &Progress::none()).unwrap();
+        assert!(matches!(add(&gz, &[f.clone()], "", &opts, &Progress::none()), Err(Error::Unsupported(_))));
+        let rar = t.path().join("x.rar");
+        fs::write(&rar, b"Rar!").unwrap();
+        assert!(matches!(add(&rar, &[f.clone()], "", &opts, &Progress::none()), Err(Error::Unsupported(_))));
+        let z = t.path().join("p.zip");
+        let zo = CreateOptions { format: Format::Zip, level: None, password: None };
+        create(&z, &[f.clone()], &zo, &Progress::none()).unwrap();
+        assert!(add(&z, &[f], "../evil", &zo, &Progress::none()).is_err());
+    }
