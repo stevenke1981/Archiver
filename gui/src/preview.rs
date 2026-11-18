@@ -15,9 +15,9 @@ const NUL_SCAN: usize = 8 << 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImageKind {
-    /// PNG / JPEG, decoded with `slint::Image::load_from_path`.
+    /// PNG / JPEG, decoded with the `image` crate.
     Raster,
-    /// SVG, decoded with `slint::Image::load_from_svg_data`.
+    /// SVG, rasterised with resvg.
     Svg,
 }
 

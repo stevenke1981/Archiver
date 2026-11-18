@@ -44,6 +44,11 @@ impl Clip {
     pub fn copy_text(&mut self, text: &str) -> Result<(), String> {
         self.handle()?.set_text(text).map_err(clip_err)
     }
+
+    /// Text currently on the clipboard (for pasting into text fields).
+    pub fn paste_text(&mut self) -> Option<String> {
+        self.handle().ok()?.get_text().ok()
+    }
 }
 
 #[cfg(test)]
