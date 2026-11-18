@@ -24,7 +24,7 @@ jobs:
             name: windows-x64
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: |
@@ -52,7 +52,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: ./scripts/build-installer.ps1
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: archiver-${{ matrix.name }}
           path: |
@@ -62,7 +62,7 @@ jobs:
           if-no-files-found: error
       - name: Attach to GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             dist/*.zip
@@ -74,14 +74,14 @@ jobs:
     name: Build macOS universal .app
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
       - uses: Swatinem/rust-cache@v2
       - name: Build universal binaries and app bundle
         run: ./scripts/macos-bundle.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: archiver-macos-universal
           path: |
@@ -90,7 +90,7 @@ jobs:
           if-no-files-found: error
       - name: Attach to GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             dist/*.zip

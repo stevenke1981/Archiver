@@ -18,7 +18,7 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: |
@@ -104,7 +104,7 @@ jobs:
           if ($p.ExitCode -ne 0) { throw "archiver --screenshot failed ($($p.ExitCode))" }
           if (-not (Test-Path $shot) -or (Get-Item $shot).Length -lt 5000) { throw "screenshot missing or blank" }
           "SHOT=$shot" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: runner.os == 'Windows' && always()
         with:
           name: windows-gui-screenshot
@@ -122,7 +122,7 @@ jobs:
         if: runner.os == 'Windows' && always()
         shell: pwsh
         run: if (Test-Path install.log) { Get-Content install.log -Tail 80 }
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: runner.os == 'Windows'
         with:
           name: archiver-setup-windows-x64
