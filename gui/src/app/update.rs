@@ -728,10 +728,16 @@ fn do_extract(m: &mut Model, fx: &mut dyn Effects, scope: ExtractScope) {
     };
     let pw = m.opt_pw();
     if sources.is_empty() {
-        if let Some(p) = fx.pick_file("選擇要解壓縮的壓縮檔") {
-            open_archive(m, fx, p);
+        // nothing open or selected: pick an archive, then where to put it, then extract
+        let Some(p) = fx.pick_file("選擇要解壓縮的壓縮檔") else { return };
+        if Format::detect(&p).is_none() {
+            return set_status(m, format!("不支援的格式：{}", p.display()));
         }
-        return;
+        let start = p.parent().map(Path::to_path_buf).unwrap_or(start);
+        let Some(dest) = fx.pick_folder("解壓縮至…", Some(&start)) else { return };
+        // an encrypted archive fails without a password: open it so one can be entered
+        m.fallback_open = Some(p.clone());
+        return extract_into(m, fx, vec![p], None, pw, dest);
     }
     let title = if names.is_some() { "解壓縮選取項目至…" } else { "解壓縮至…" };
     let Some(dest) = fx.pick_folder(title, Some(&start)) else { return };
