@@ -1,21 +1,28 @@
 [package]
 name = "archiver"
-version = "0.6.1"
+version = "0.7.0"
 edition = "2024"
 
 [dependencies]
 clap = { version = "4.6.7", features = ["derive"] }
 archiver-core = { path = "../core" }
 rfd = { version = "0.17.2", default-features = false, features = ["gtk3"] }
-slint = { version = "1.18.1", default-features = false, features = ["std", "compat-1-2", "backend-winit", "renderer-software", "software-renderer-systemfonts", "unstable-winit-030"] }
 chrono = "0.4.45"
-# already in the dependency tree through Slint; file-list clipboard on Windows/macOS/X11/Wayland
+serde_json = "1"
+# file-list clipboard on Windows/macOS/X11/Wayland
 arboard = { version = "3.6.1", default-features = false }
+# AcmeUI-Native (GPU via wgpu with CPU fallback; CPU rasteriser also used for --screenshot)
+acme-core = { git = "https://github.com/stevenke1981/AcmeUI-Native.git", rev = "c2e0fd9765d0f25119a240ad1adb378c045df63f" }
+acme-platform = { git = "https://github.com/stevenke1981/AcmeUI-Native.git", rev = "c2e0fd9765d0f25119a240ad1adb378c045df63f" }
+acme-text = { git = "https://github.com/stevenke1981/AcmeUI-Native.git", rev = "c2e0fd9765d0f25119a240ad1adb378c045df63f" }
+acme-textinput = { git = "https://github.com/stevenke1981/AcmeUI-Native.git", rev = "c2e0fd9765d0f25119a240ad1adb378c045df63f" }
+acme-theme = { git = "https://github.com/stevenke1981/AcmeUI-Native.git", rev = "c2e0fd9765d0f25119a240ad1adb378c045df63f" }
+acme-render-cpu = { git = "https://github.com/stevenke1981/AcmeUI-Native.git", rev = "c2e0fd9765d0f25119a240ad1adb378c045df63f" }
+# preview decoding, toolbar SVG icons and PNG screenshots
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+resvg = { version = "0.48", default-features = false }
 
-# Windows: the software renderer's partial (damage-region) presentation via softbuffer
-# leaves parts of the window unpainted/transparent on some systems, so use Skia there.
 [target.'cfg(windows)'.dependencies]
-slint = { version = "1.18.1", default-features = false, features = ["renderer-skia"] }
 winreg = "0.55"
 
 [dev-dependencies]
@@ -30,5 +37,4 @@ name = "rarc"
 path = "src/bin/rarc.rs"
 
 [build-dependencies]
-slint-build = "1.18.1"
 winresource = "0.1.34"

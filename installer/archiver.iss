@@ -1,5 +1,5 @@
 ﻿; Inno Setup script for Archiver (Windows x64).
-; Build:  ISCC.exe /DAppVersion=0.6.1 /DSrcDir=..\target\release installer\archiver.iss
+; Build:  ISCC.exe /DAppVersion=0.7.0 /DSrcDir=..\target\release installer\archiver.iss
 ; Requires installer\ChineseTraditional.isl (downloaded in CI from the Inno Setup unofficial translations).
 
 #ifndef AppVersion
@@ -52,12 +52,12 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [CustomMessages]
 chinesetraditional.TaskAssoc=將壓縮檔類型（zip、7z、rar、tar、gz、bz2、xz、zst…）加入「開啟檔案」清單
-chinesetraditional.TaskContext=加入檔案總管右鍵選單（解壓縮至…、解壓縮到這裡、解壓縮到資料夾、加入壓縮檔）
+chinesetraditional.TaskContext=加入檔案總管右鍵選單（解壓縮、測試壓縮檔、加入壓縮檔、壓縮成同名 .zip / .7z；支援多選）
 chinesetraditional.TaskPath=將 rarc 命令列工具加入 PATH
 chinesetraditional.GroupIntegration=整合：
 chinesetraditional.ArchiveType=Archiver 壓縮檔
 english.TaskAssoc=Associate archive types (zip, 7z, rar, tar, gz, bz2, xz, zst...) with Archiver
-english.TaskContext=Add Explorer right-click menu (Extract to..., Extract here, Extract to folder, Add to archive)
+english.TaskContext=Add Explorer right-click menu (extract, test, add to archive, compress to .zip / .7z; multi-select aware)
 english.TaskPath=Add the rarc command-line tool to PATH
 english.GroupIntegration=Integration:
 english.ArchiveType=Archiver archive

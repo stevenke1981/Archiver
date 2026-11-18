@@ -24,13 +24,29 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends pkg-config libgtk-3-dev \
-            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libgl1-mesa-dev libwayland-dev libfontconfig1-dev
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libwayland-dev libfontconfig1-dev
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Build (release)
         run: cargo build --release --locked
       - name: Test
-        run: cargo test --locked
+        run: cargo test --workspace --locked
+      - name: rarc JSON smoke test
+        shell: bash
+        run: |
+          R=target/release/rarc
+          [ "$RUNNER_OS" = "Windows" ] && R=target/release/rarc.exe
+          mkdir -p smoke/in && echo hello > smoke/in/a.txt
+          $R c smoke/t.zip smoke/in --json | grep -q '"ok":true'
+          $R l smoke/t.zip --json | grep -q '"name":"in/a.txt"'
+          $R t smoke/t.zip --json | grep -q '"tested":1'
+          $R comment set smoke/t.zip -m "ci comment"
+          $R comment show smoke/t.zip | grep -q "ci comment"
+          echo more > smoke/b.txt
+          $R a smoke/t.zip smoke/b.txt --prefix in --json | grep -q '"ok":true'
+          $R l smoke/t.zip --json | grep -q '"name":"in/b.txt"'
       - name: Shell integration smoke test (register / unregister)
         shell: bash
         env:
@@ -47,32 +63,53 @@ jobs:
           fi
           $B --register-shell
           if [ "$RUNNER_OS" = "Windows" ]; then
-            ! reg query 'HKCU\Software\Classes\Directory\shell\RustArchiver' 2>/dev/null
+            if reg query 'HKCU\Software\Classes\Directory\shell\RustArchiver' >/dev/null 2>&1; then echo "legacy verb survived"; exit 1; fi
           else
             test ! -e ~/.local/share/applications/rust-archiver.desktop
             test ! -e ~/.local/share/nautilus/scripts/"Rust Archiver"
             test ! -e ~/Library/Services/"Rust Archiver - Extract here.workflow"
           fi
           case "$RUNNER_OS" in
-            Windows) reg query 'HKCU\Software\Classes\SystemFileAssociations\.zip\shell\Archiver\shell\02extracthere\command' /ve
-                     reg query 'HKCU\Software\Classes\SystemFileAssociations\.zip\shell\Archiver\shell\05extractdest\command' /ve
-                     reg query 'HKCU\Software\Classes\Directory\shell\Archiver' ;;
+            Windows) K='HKCU\Software\Classes\SystemFileAssociations\.zip\shell\Archiver'
+                     reg query "$K\shell\02extracthere\command" /ve | grep -q -- '--collect --extract-here'
+                     reg query "$K\shell\05extractdest\command" /ve
+                     reg query "$K\shell\06test\command" /ve | grep -q -- '--collect --test'
+                     reg query "$K\shell\07compresszip\command" /ve | grep -q -- '--compress-to zip'
+                     reg query "$K\shell\08compress7z\command" /ve | grep -q -- '--compress-to 7z'
+                     reg query "$K\shell\06test" /v MultiSelectModel | grep -q Player
+                     reg query "$K\shell\06test" /v CommandFlags | grep -q 'REG_DWORD'
+                     reg query "$K\shell\06test" /v Icon
+                     reg query 'HKCU\Software\Classes\Directory\shell\Archiver' /v MultiSelectModel | grep -q Player
+                     reg query 'HKCU\Software\Classes\Directory\shell\Archiver\shell\07compresszip\command' /ve
+                     # re-registering must not leave stale verbs behind
+                     reg add "$K\shell\99stale" /ve /d x /f
+                     $B --register-shell
+                     if reg query "$K\shell\99stale" >/dev/null 2>&1; then echo "stale verb survived"; exit 1; fi ;;
             macOS)   ls -R ~/Library/Services | grep "Archiver - "
                      plutil -lint ~/Library/Services/Archiver\ -\ *.workflow/Contents/Info.plist ~/Library/Services/Archiver\ -\ *.workflow/Contents/document.wflow ;;
             Linux)   cat ~/.local/share/applications/archiver.desktop
                      ls -la ~/.local/share/nautilus/scripts/"Archiver" ~/.local/share/nemo/actions ;;
           esac
           $B --unregister-shell
-          if [ "$RUNNER_OS" = "Windows" ]; then ! reg query 'HKCU\Software\Classes\Directory\shell\Archiver' 2>/dev/null; fi
-      - name: GUI screenshot (Windows)
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            if reg query 'HKCU\Software\Classes\Directory\shell\Archiver' >/dev/null 2>&1; then echo "verb survived unregister"; exit 1; fi
+          fi
+      - name: GUI screenshot (headless, CPU rasteriser)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: ./scripts/win-screenshot.ps1 -Exe target\release\archiver.exe
+        run: |
+          # archiver.exe is a GUI-subsystem binary: '&' neither waits nor sets $LASTEXITCODE
+          $shot = Join-Path $env:RUNNER_TEMP 'shot.png'
+          $p = Start-Process target\release\archiver.exe -ArgumentList '--screenshot', $shot, '--size', '1100x720' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "archiver --screenshot failed ($($p.ExitCode))" }
+          if (-not (Test-Path $shot) -or (Get-Item $shot).Length -lt 5000) { throw "screenshot missing or blank" }
+          "SHOT=$shot" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - uses: actions/upload-artifact@v4
         if: runner.os == 'Windows' && always()
         with:
           name: windows-gui-screenshot
-          path: win-screenshot.png
+          path: ${{ runner.temp }}/shot.png
+          if-no-files-found: ignore
       - name: Build Windows installer (Inno Setup)
         if: runner.os == 'Windows'
         shell: pwsh

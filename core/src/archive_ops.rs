@@ -186,6 +186,7 @@ pub(super) fn open_zip(archive: &Path) -> Result<zip::ZipArchive<BufReader<File>
 /// ZIP extraction. Entries are chosen from the central directory alone, so unselected entries are
 /// never opened or decrypted. Large jobs are split into size-balanced groups (longest first),
 /// each extracted by its own thread with its own file handle.
+#[allow(clippy::absurd_extreme_comparisons)] // ZIP_PARALLEL_MIN is 0 under cfg(test)
 pub(super) fn extract_zip(archive: &Path, dest: &Path, password: Option<&str>, selected: Option<&[String]>, threads: usize, p: &Progress) -> Result<()> {
     let mut z = open_zip(archive)?;
     let (mut files, mut total) = (Vec::new(), 0);
@@ -393,7 +394,10 @@ pub fn delete(archive: &Path, names: &[String], password: Option<&str>, p: &Prog
     })();
     match res {
         Ok(()) => {
-            fs::rename(&tmp, archive)?;
+            if let Err(e) = fs::rename(&tmp, archive) {
+                let _ = fs::remove_file(&tmp);
+                return Err(e.into());
+            }
             Ok(())
         }
         Err(e) => {
@@ -404,10 +408,14 @@ pub fn delete(archive: &Path, names: &[String], password: Option<&str>, p: &Prog
 }
 
 pub(super) fn tempdir_near(archive: &Path) -> Result<PathBuf> {
-    let base = std::env::temp_dir();
+    // next to the archive: same volume, and no need for free space in %TEMP%
+    let base = match archive.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
     let stem = archive.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
     for i in 0..1000u32 {
-        let d = base.join(format!("archiver-{}-{}-{i}", std::process::id(), stem));
+        let d = base.join(format!(".archiver-{}-{}-{i}", std::process::id(), stem));
         if fs::create_dir(&d).is_ok() {
             return Ok(d);
         }
