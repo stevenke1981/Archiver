@@ -51,7 +51,38 @@ pub const COMMANDS: &[(&str, &str, &str, bool)] = &[
     ("compress", "Add to archive…", "--compress", false),
     // Append commands to keep the existing numbered Windows verb keys stable on upgrade.
     ("extractdest", "Extract to…", "--extract-to", true),
+    ("test", "Test archive", "--test", true),
+    ("compresszip", "Compress to .zip", "--compress-to zip", false),
+    ("compress7z", "Compress to .7z", "--compress-to 7z", false),
+    // Windows only (it duplicates "Extract to folder" on file managers that list files individually)
+    ("extracteach", "Extract each to its own folder", "--extract-to-folder", true),
 ];
+
+/// Commands offered on Linux / macOS (everything except the Windows-only ones).
+fn portable() -> impl Iterator<Item = &'static (&'static str, &'static str, &'static str, bool)> {
+    COMMANDS.iter().filter(|c| c.0 != "extracteach")
+}
+
+/// Windows menu label (Traditional Chinese).
+fn win_label(id: &str) -> &'static str {
+    match id {
+        "open" => "以 Archiver 開啟",
+        "extracthere" => "解壓縮到這裡",
+        "extractto" => "解壓縮到「壓縮檔名稱\\」",
+        "compress" => "加入壓縮檔…",
+        "extractdest" => "解壓縮至…",
+        "test" => "測試壓縮檔",
+        "compresszip" => "壓縮成同名 .zip",
+        "compress7z" => "壓縮成同名 .7z",
+        "extracteach" => "各自解壓縮到同名資料夾",
+        _ => "Archiver",
+    }
+}
+
+/// Verbs that start a new group in the cascade (CommandFlags ECF_SEPARATORBEFORE).
+fn separator_before(id: &str) -> bool {
+    matches!(id, "compress" | "test")
+}
 
 // ------------------------------------------------------------------ Windows
 
@@ -69,6 +100,7 @@ pub fn windows_keys(exe: &str, base: &str) -> Vec<RegKey> {
             ("MUIVerb".to_string(), APP_NAME.to_string()),
             ("SubCommands".to_string(), String::new()),
             ("Icon".to_string(), format!("\"{exe}\",0")),
+            ("MultiSelectModel".to_string(), "Player".to_string()),
         ];
         if let Some(a) = applies_to {
             vals.push(("AppliesTo".into(), a));
@@ -78,16 +110,22 @@ pub fn windows_keys(exe: &str, base: &str) -> Vec<RegKey> {
             if *arc_only && !archive {
                 continue;
             }
-            let label = match *id {
-                "extractto" => "Extract to folder\\".to_string(),
-                "extractdest" => "解壓縮至…".to_string(),
-                _ => label.to_string(),
-            };
+            let _ = label;
             let sub = format!("{root}\\shell\\{:02}{id}", i + 1);
-            keys.push(RegKey { path: sub.clone(), values: vec![("MUIVerb".into(), label)] });
+            let single = *id == "open"; // opens one archive; other verbs aggregate the selection
+            let mut vals = vec![
+                ("MUIVerb".to_string(), win_label(id).to_string()),
+                ("Icon".to_string(), format!("\"{exe}\",0")),
+                ("MultiSelectModel".to_string(), if single { "Single" } else { "Player" }.to_string()),
+            ];
+            if separator_before(id) {
+                vals.push(("CommandFlags".into(), "0x20".into()));
+            }
+            keys.push(RegKey { path: sub.clone(), values: vals });
+            let collect = if single { "" } else { "--collect " };
             keys.push(RegKey {
                 path: format!("{sub}\\command"),
-                values: vec![(String::new(), format!("\"{exe}\" {flag} \"%1\""))],
+                values: vec![(String::new(), format!("\"{exe}\" {collect}{flag} \"%1\""))],
             });
         }
     };
@@ -121,6 +159,8 @@ mod win {
 
     pub fn apply(exe: &str, base: &str) -> std::io::Result<()> {
         let hkcu = WKey::predef(HKEY_CURRENT_USER);
+        // delete the roots first so verbs removed or renumbered in newer versions disappear
+        remove_roots(&windows_roots(base));
         for k in windows_keys(exe, base) {
             let (key, _) = hkcu.create_subkey(&k.path)?;
             for (n, v) in &k.values {
@@ -197,17 +237,20 @@ pub fn linux_files(exe: &str) -> Vec<GenFile> {
         format!(
             "[Desktop Entry]\nType=Application\nName={APP_NAME}\nGenericName=Archive Manager\nComment=Create and extract archives (ZIP, 7z, TAR, RAR...)\n\
 Exec={q} %F\nIcon=package-x-generic\nTerminal=false\nCategories=Utility;Archiving;Compression;\nMimeType={mimes}\n\
-Actions=ExtractHere;ExtractToFolder;ExtractTo;Compress;\n\n\
+Actions=ExtractHere;ExtractToFolder;ExtractTo;Test;Compress;CompressZip;Compress7z;\n\n\
 [Desktop Action ExtractHere]\nName=Extract here\nExec={q} --extract-here %F\n\n\
 [Desktop Action ExtractToFolder]\nName=Extract to folder\nExec={q} --extract-to-folder %F\n\n\
 [Desktop Action ExtractTo]\nName=Extract to…\nExec={q} --extract-to %F\n\n\
-[Desktop Action Compress]\nName=Add to archive…\nExec={q} --compress %F\n"
+[Desktop Action Test]\nName=Test archive\nExec={q} --test %F\n\n\
+[Desktop Action Compress]\nName=Add to archive…\nExec={q} --compress %F\n\n\
+[Desktop Action CompressZip]\nName=Compress to .zip\nExec={q} --compress-to zip %F\n\n\
+[Desktop Action Compress7z]\nName=Compress to .7z\nExec={q} --compress-to 7z %F\n"
         ),
         false,
     ));
 
     // 2) Nautilus (GNOME Files) scripts -> Scripts > Archiver > ...
-    for (_, label, flag, _) in COMMANDS {
+    for (_, label, flag, _) in portable() {
         let body = if *flag == "--open" {
             format!("#!/bin/sh\n# Archiver Nautilus script\nfor f in \"$@\"; do {} --open \"$f\" & done\n", sh_quote(exe))
         } else {
@@ -218,17 +261,20 @@ Actions=ExtractHere;ExtractToFolder;ExtractTo;Compress;\n\n\
 
     // 3) Dolphin service menus (KF6 location + KF5 legacy location)
     let dolphin_archive = format!(
-        "[Desktop Entry]\nName={APP_NAME}\nType=Service\nServiceTypes=KonqPopupMenu/Plugin\nMimeType={mimes}\nActions=open;extractHere;extractTo;extractDest;\n\
+        "[Desktop Entry]\nName={APP_NAME}\nType=Service\nServiceTypes=KonqPopupMenu/Plugin\nMimeType={mimes}\nActions=open;extractHere;extractTo;extractDest;testArchive;\n\
 X-KDE-Submenu={APP_NAME}\nX-KDE-Priority=TopLevel\n\n\
 [Desktop Action open]\nName=Open with Archiver\nIcon=package-x-generic\nExec={q} --open %f\n\n\
 [Desktop Action extractHere]\nName=Extract here\nIcon=archive-extract\nExec={q} --extract-here %F\n\n\
 [Desktop Action extractTo]\nName=Extract to folder\nIcon=archive-extract\nExec={q} --extract-to-folder %F\n\n\
-[Desktop Action extractDest]\nName=Extract to…\nIcon=archive-extract\nExec={q} --extract-to %F\n"
+[Desktop Action extractDest]\nName=Extract to…\nIcon=archive-extract\nExec={q} --extract-to %F\n\n\
+[Desktop Action testArchive]\nName=Test archive\nIcon=dialog-ok\nExec={q} --test %F\n"
     );
     let dolphin_compress = format!(
-        "[Desktop Entry]\nName={APP_NAME}\nType=Service\nServiceTypes=KonqPopupMenu/Plugin\nMimeType=all/all;all/allfiles;inode/directory;\nActions=compress;\n\
+        "[Desktop Entry]\nName={APP_NAME}\nType=Service\nServiceTypes=KonqPopupMenu/Plugin\nMimeType=all/all;all/allfiles;inode/directory;\nActions=compress;compressZip;compress7z;\n\
 X-KDE-Submenu={APP_NAME}\nX-KDE-Priority=TopLevel\n\n\
-[Desktop Action compress]\nName=Add to archive…\nIcon=archive-insert\nExec={q} --compress %F\n"
+[Desktop Action compress]\nName=Add to archive…\nIcon=archive-insert\nExec={q} --compress %F\n\n\
+[Desktop Action compressZip]\nName=Compress to .zip\nIcon=archive-insert\nExec={q} --compress-to zip %F\n\n\
+[Desktop Action compress7z]\nName=Compress to .7z\nIcon=archive-insert\nExec={q} --compress-to 7z %F\n"
     );
     for dir in [".local/share/kio/servicemenus", ".local/share/kservices5/ServiceMenus"] {
         out.push((format!("{dir}/archiver-archive.desktop").into(), dolphin_archive.clone(), true));
@@ -237,7 +283,7 @@ X-KDE-Submenu={APP_NAME}\nX-KDE-Priority=TopLevel\n\n\
 
     // 4) Nemo (Cinnamon) actions
     let exts = archiver_core::archive_extensions().join(";");
-    for (id, label, flag, arc_only) in COMMANDS {
+    for (id, label, flag, arc_only) in portable() {
         let (sel, filter) = if *arc_only {
             (if *flag == "--open" { "s" } else { "notnone" }, format!("Extensions={exts};"))
         } else {
@@ -289,7 +335,7 @@ pub fn macos_workflow_name(label: &str) -> String {
 /// Generate Quick Action bundles: files under ~/Library/Services/<name>.workflow/Contents/.
 pub fn macos_files(exe: &str) -> Vec<GenFile> {
     let mut out = Vec::new();
-    for (_, label, flag, arc_only) in COMMANDS {
+    for (_, label, flag, arc_only) in portable() {
         let name = macos_workflow_name(label);
         let dir = PathBuf::from(format!("Library/Services/{name}.workflow/Contents"));
         let types: Vec<&str> = if *arc_only { ARCHIVE_UTIS.to_vec() } else { vec!["public.item"] };
@@ -467,7 +513,7 @@ pub fn macos_files(exe: &str) -> Vec<GenFile> {
 }
 
 fn macos_extra_dirs() -> Vec<PathBuf> {
-    COMMANDS.iter().map(|(_, l, _, _)| PathBuf::from(format!("Library/Services/{}.workflow", macos_workflow_name(l)))).collect()
+    portable().map(|(_, l, _, _)| PathBuf::from(format!("Library/Services/{}.workflow", macos_workflow_name(l)))).collect()
 }
 
 // ------------------------------------------------------------------ file install helpers
@@ -672,16 +718,38 @@ mod tests {
         assert!(zip.values.contains(&("MUIVerb".into(), "Archiver".into())));
         assert!(zip.values.contains(&("SubCommands".into(), "".into())));
         let cmd = find(r"Software\Classes\SystemFileAssociations\.7z\shell\Archiver\shell\02extracthere\command");
-        assert_eq!(cmd.values[0].1, r#""C:\Program Files\RA\archiver.exe" --extract-here "%1""#);
+        assert_eq!(cmd.values[0].1, r#""C:\Program Files\RA\archiver.exe" --collect --extract-here "%1""#);
+        let open = find(r"Software\Classes\SystemFileAssociations\.zip\shell\Archiver\shell\01open\command");
+        assert_eq!(open.values[0].1, r#""C:\Program Files\RA\archiver.exe" --open "%1""#);
+        // new verbs, in order, with icon + multi-select model
+        let verbs = ["01open", "02extracthere", "03extractto", "04compress", "05extractdest", "06test", "07compresszip", "08compress7z", "09extracteach"];
+        for v in verbs {
+            let k = find(&format!(r"Software\Classes\SystemFileAssociations\.zip\shell\Archiver\shell\{v}"));
+            assert!(k.values.iter().any(|(n, x)| n == "Icon" && x.contains("archiver.exe")), "{v}");
+            assert!(k.values.iter().any(|(n, _)| n == "MultiSelectModel"), "{v}");
+        }
+        assert!(zip.values.contains(&("MultiSelectModel".into(), "Player".into())));
+        let test = find(r"Software\Classes\SystemFileAssociations\.zip\shell\Archiver\shell\06test");
+        assert!(test.values.contains(&("MUIVerb".into(), "測試壓縮檔".into())));
+        assert!(test.values.contains(&("MultiSelectModel".into(), "Player".into())));
+        let cz = find(r"Software\Classes\Directory\shell\Archiver\shell\07compresszip\command");
+        assert_eq!(cz.values[0].1, r#""C:\Program Files\RA\archiver.exe" --collect --compress-to zip "%1""#);
+        let c7 = find(r"Software\Classes\Directory\shell\Archiver\shell\08compress7z");
+        assert!(c7.values.contains(&("MUIVerb".into(), "壓縮成同名 .7z".into())));
+        let each = find(r"Software\Classes\SystemFileAssociations\.rar\shell\Archiver\shell\09extracteach\command");
+        assert!(each.values[0].1.ends_with(r#"--collect --extract-to-folder "%1""#));
+        let ex3 = find(r"Software\Classes\SystemFileAssociations\.zip\shell\Archiver\shell\03extractto");
+        assert!(ex3.values.contains(&("MUIVerb".into(), "解壓縮到「壓縮檔名稱\\」".into())));
         find(r"Software\Classes\SystemFileAssociations\.rar\shell\Archiver\shell\03extractto\command");
         let chooser = find(r"Software\Classes\SystemFileAssociations\.zip\shell\Archiver\shell\05extractdest");
         assert!(chooser.values.contains(&("MUIVerb".into(), "解壓縮至…".into())));
         let chooser_cmd = find(r"Software\Classes\SystemFileAssociations\.zip\shell\Archiver\shell\05extractdest\command");
-        assert_eq!(chooser_cmd.values[0].1, r#""C:\Program Files\RA\archiver.exe" --extract-to "%1""#);
+        assert_eq!(chooser_cmd.values[0].1, r#""C:\Program Files\RA\archiver.exe" --collect --extract-to "%1""#);
         // generic files and folders only get "Add to archive"
         let star = find(r"Software\Classes\*\shell\Archiver");
         assert!(star.values.iter().any(|(n, v)| n == "AppliesTo" && v.contains("System.FileExtension:=.zip")));
         find(r"Software\Classes\Directory\shell\Archiver\shell\04compress\command");
+        assert!(!keys.iter().any(|k| k.path.starts_with(r"Software\Classes\Directory") && k.path.contains("06test")));
         assert!(!keys.iter().any(|k| k.path.starts_with(r"Software\Classes\Directory") && k.path.contains("extract")));
         assert_eq!(windows_roots(WIN_BASE).len(), final_extensions().len() + 2);
     }
@@ -740,7 +808,7 @@ mod tests {
     #[test]
     fn macos_quick_actions() {
         let files = macos_files("/Applications/Archiver.app/Contents/MacOS/archiver");
-        assert_eq!(files.len(), COMMANDS.len() * 2);
+        assert_eq!(files.len(), portable().count() * 2);
         let info = files.iter().find(|f| f.0.ends_with("Archiver - Extract here.workflow/Contents/Info.plist")).unwrap();
         assert!(info.1.contains("runWorkflowAsService") && info.1.contains("public.zip-archive"));
         let add = files.iter().find(|f| f.0.ends_with("Archiver - Add to archive.workflow/Contents/Info.plist")).unwrap();
@@ -819,17 +887,21 @@ mod tests {
         win::apply(r"C:\x\archiver.exe", base).unwrap();
         assert!(win::exists(base));
         let v = win::read_default(&format!(r"{base}\SystemFileAssociations\.zip\shell\Archiver\shell\02extracthere\command")).unwrap();
-        assert_eq!(v, r#""C:\x\archiver.exe" --extract-here "%1""#);
+        assert_eq!(v, r#""C:\x\archiver.exe" --collect --extract-here "%1""#);
+        // a stale verb from an older layout must disappear on re-register
+        let hkcu = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
+        let stale = format!(r"{base}\SystemFileAssociations\.zip\shell\Archiver\shell\99stale");
+        hkcu.create_subkey(&stale).unwrap();
         // Re-registering an existing installation adds/updates the new chooser command,
         // while keeping the old automatic "extract to folder" command intact.
         win::apply(r"C:\New Apps\archiver.exe", base).unwrap();
         let chooser = format!(r"{base}\SystemFileAssociations\.zip\shell\Archiver\shell\05extractdest");
-        let hkcu = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
         let label: String = hkcu.open_subkey(&chooser).unwrap().get_value("MUIVerb").unwrap();
         assert_eq!(label, "解壓縮至…");
-        assert_eq!(win::read_default(&format!(r"{chooser}\command")).unwrap(), r#""C:\New Apps\archiver.exe" --extract-to "%1""#);
+        assert_eq!(win::read_default(&format!(r"{chooser}\command")).unwrap(), r#""C:\New Apps\archiver.exe" --collect --extract-to "%1""#);
+        assert!(hkcu.open_subkey(&stale).is_err(), "stale verb survived re-register");
         let old = format!(r"{base}\SystemFileAssociations\.zip\shell\Archiver\shell\03extractto\command");
-        assert_eq!(win::read_default(&old).unwrap(), r#""C:\New Apps\archiver.exe" --extract-to-folder "%1""#);
+        assert_eq!(win::read_default(&old).unwrap(), r#""C:\New Apps\archiver.exe" --collect --extract-to-folder "%1""#);
         win::remove(base).unwrap();
         assert!(!win::exists(base));
         assert!(hkcu.open_subkey(&chooser).is_err());
