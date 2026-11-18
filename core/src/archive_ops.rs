@@ -394,7 +394,10 @@ pub fn delete(archive: &Path, names: &[String], password: Option<&str>, p: &Prog
     })();
     match res {
         Ok(()) => {
-            fs::rename(&tmp, archive)?;
+            if let Err(e) = fs::rename(&tmp, archive) {
+                let _ = fs::remove_file(&tmp);
+                return Err(e.into());
+            }
             Ok(())
         }
         Err(e) => {
@@ -405,10 +408,14 @@ pub fn delete(archive: &Path, names: &[String], password: Option<&str>, p: &Prog
 }
 
 pub(super) fn tempdir_near(archive: &Path) -> Result<PathBuf> {
-    let base = std::env::temp_dir();
+    // next to the archive: same volume, and no need for free space in %TEMP%
+    let base = match archive.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
     let stem = archive.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
     for i in 0..1000u32 {
-        let d = base.join(format!("archiver-{}-{}-{i}", std::process::id(), stem));
+        let d = base.join(format!(".archiver-{}-{}-{i}", std::process::id(), stem));
         if fs::create_dir(&d).is_ok() {
             return Ok(d);
         }

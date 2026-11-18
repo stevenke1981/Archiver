@@ -523,6 +523,68 @@ use super::*;
     }
 
     #[test]
+    fn add_tar_streams_and_replaces() {
+        for fmt in [Format::Tar, Format::TarGz, Format::TarZst] {
+            let t = tempfile::tempdir().unwrap();
+            let out = t.path().join(format!("s.{}", fmt.extension()));
+            let opts = CreateOptions { format: fmt, level: None, password: None };
+            // build a tar with an executable file and (on unix) a symlink
+            let enc = encoder(fmt, wr(File::create(&out).unwrap()), None).unwrap();
+            let mut b = tar::Builder::new(enc);
+            let mut h = tar::Header::new_gnu();
+            h.set_size(3);
+            h.set_mode(0o751);
+            h.set_entry_type(tar::EntryType::Regular);
+            b.append_data(&mut h, "run.sh", &b"old"[..]).unwrap();
+            let mut h = tar::Header::new_gnu();
+            h.set_size(4);
+            h.set_mode(0o600);
+            b.append_data(&mut h, "keep.txt", &b"keep"[..]).unwrap();
+            let mut h = tar::Header::new_gnu();
+            h.set_size(0);
+            h.set_mode(0o777);
+            h.set_entry_type(tar::EntryType::Symlink);
+            b.append_link(&mut h, "link", "keep.txt").unwrap();
+            b.into_inner().unwrap().finish_box().unwrap();
+
+            let f = t.path().join("run.sh");
+            fs::write(&f, b"replaced!").unwrap();
+            add(&out, &[f], "", &opts, &Progress::none()).unwrap();
+
+            let mut ar = tar::Archive::new(decoder(fmt, rd(File::open(&out).unwrap())).unwrap());
+            let mut seen = std::collections::BTreeMap::new();
+            for e in ar.entries().unwrap() {
+                let mut e = e.unwrap();
+                let mut s = Vec::new();
+                e.read_to_end(&mut s).unwrap();
+                let link = e.link_name().unwrap().map(|l| l.to_string_lossy().to_string());
+                seen.insert(e.path().unwrap().to_string_lossy().to_string(), (e.header().mode().unwrap(), e.header().entry_type(), link, s));
+            }
+            assert_eq!(seen.len(), 3, "{fmt:?} {seen:?}");
+            assert_eq!(seen["run.sh"].3, b"replaced!");
+            assert_eq!(seen["keep.txt"].0 & 0o777, 0o600, "{fmt:?}");
+            assert_eq!(seen["keep.txt"].3, b"keep");
+            assert!(seen["link"].1.is_symlink(), "{fmt:?}");
+            assert_eq!(seen["link"].2.as_deref(), Some("keep.txt"));
+            assert!(!t.path().join(format!("s.{}.add.tmp", fmt.extension())).exists());
+        }
+    }
+
+    #[test]
+    fn set_comment_leaves_no_temp() {
+        let t = tempfile::tempdir().unwrap();
+        let f = t.path().join("a.txt");
+        fs::write(&f, b"x").unwrap();
+        let out = t.path().join("c.zip");
+        let opts = CreateOptions { format: Format::Zip, level: None, password: None };
+        create(&out, &[f], &opts, &Progress::none()).unwrap();
+        set_comment(&out, "a long comment to be replaced", &Progress::none()).unwrap();
+        set_comment(&out, "short", &Progress::none()).unwrap();
+        assert_eq!(read_comment(&out).unwrap().as_deref(), Some("short"));
+        assert_eq!(fs::read_dir(t.path()).unwrap().count(), 2);
+    }
+
+    #[test]
     fn add_same_name_replaces_and_keeps_comment() {
         let t = tempfile::tempdir().unwrap();
         let f = t.path().join("a.txt");
