@@ -1,199 +1,360 @@
 # Archiver
 
-跨平台（Windows / Linux / macOS）的壓縮／解壓縮工具，介面仿 WinRAR 主視窗。核心與 GUI 皆以 Rust 撰寫（GUI 使用 [Slint](https://slint.dev/)，軟體繪製器，不需 GPU）。
+Archiver 是跨平台（Windows / Linux / macOS）的壓縮與解壓縮工具，主視窗仿 WinRAR 的版面。核心函式庫 `archiver-core` 與命令列工具 `rarc` 以 Rust 撰寫；圖形介面 `archiver` 使用 [AcmeUI-Native](https://github.com/stevenke1981/AcmeUI-Native) 繪製，GPU（wgpu）優先，沒有可用 GPU 時自動改用 CPU 繪製。
 
-程式結構：`core/src` 將壓縮檔的列舉、解壓與驗證放在 `archive_ops.rs`，建立壓縮檔放在 `create.rs`，分批作業與預覽各有獨立模組；`gui/src` 則依清單、背景工作、操作、剪貼簿、預覽、事件接線與系統操作拆分。核心對外 API 仍由 `archiver-core` 匯出。
+![Archiver 主視窗](docs/screenshot.png)
 
-![screenshot](docs/screenshot.png)
+## 快速開始
+
+### 下載與安裝
+
+到 [Releases](https://github.com/stevenke1981/Archiver/releases) 下載對應平台的檔案：
+
+- **Windows**：`archiver-setup-windows-x64.exe`（安裝程式，建議）或 `archiver-windows-x64.zip`（免安裝）。
+- **Linux**：`archiver-linux-x64.tar.gz`。需要系統已安裝 GTK3 執行環境（檔案對話框使用）。
+- **macOS**：`archiver-macos-universal-app.zip`（內含 `Archiver.app`，Apple Silicon 與 Intel 通用）或 `archiver-macos-universal.tar.gz`（只有執行檔）。App 採 ad-hoc 簽章、未經 Apple 公證，第一次開啟請在 Finder 中對 App 按右鍵 → 打開。
+
+Windows 安裝程式的選項：
+
+- 將壓縮檔類型加入「開啟檔案」清單（預設勾選）。
+- 加入檔案總管右鍵選單（預設勾選，見下一節）。
+- 將 `rarc` 加入 PATH（預設不勾）。
+- 預設安裝到 `Program Files\Archiver`（需系統管理員）；選擇「只為目前使用者安裝」則不需管理員，安裝到 `%LOCALAPPDATA%\Programs\Archiver`。
+- 靜默安裝（目前使用者）：
+
+  ```
+  archiver-setup-windows-x64.exe /VERYSILENT /SUPPRESSMSGBOXES /CURRENTUSER /TASKS=assoc,contextmenu
+  ```
+
+- 解除安裝會移除右鍵選單、檔案關聯與 PATH 設定。
+
+### 開啟、解壓縮、建立
+
+1. **開啟**：雙擊已關聯的壓縮檔；或在 Archiver 中按 Ctrl+O（開啟壓縮檔…）；也可以把壓縮檔拖進視窗。
+2. **解壓縮**：工具列「解壓縮到」選擇目的地。只要部分項目時，先在清單中選取（Ctrl／Shift 可多選），再使用「指令 → 解壓縮選取項目…」。
+3. **建立**：工具列「加入」（沒有開啟壓縮檔時會建立新壓縮檔），或把檔案、資料夾拖進視窗，會開啟建立對話框，可選擇格式、壓縮等級與密碼（ZIP、7z）。
 
 ## 功能
 
-### 主視窗（v0.5.0 起，Slint）
+### 瀏覽與搜尋
 
-- 選單列：檔案(F)、指令(C)、工具(S)、我的最愛(O)、選項(N)、說明(H)
-- 大圖示工具列：加入、解壓縮到、測試（完整性檢查）、檢視、刪除（重寫壓縮檔）、尋找、精靈、資訊；防毒／註解／自解尚未支援（灰色）。圖示為本專案自繪 SVG
-- 路徑列與「上一層」按鈕：`壓縮檔.zip\子資料夾 - ZIP 壓縮檔, 未封裝大小 N 位元組`
-- 檔案清單：名稱、大小、封裝後、類型、修改日期、CRC32；`..` 回上層、雙擊進入壓縮檔內的資料夾、點欄位標題排序、Ctrl/Shift 多選、雙擊檔案會解壓到暫存資料夾並用系統預設程式開啟
-- 狀態列：`總共 N 個檔案, X 個位元組` 與選取資訊
-- 未開啟壓縮檔時即為檔案管理員模式，可瀏覽本機資料夾，雙擊壓縮檔即開啟
-- 鍵盤：Enter 開啟、Backspace 上一層、Delete 刪除、Ctrl+A 全選、↑／↓ 移動選取、Ctrl+C 複製到剪貼簿、Ctrl+F 尋找、F3 以預設程式檢視、F5 重新整理
+- 檔案清單顯示名稱、大小、封裝後大小、類型、修改日期與 CRC32；點欄位標題排序；雙擊資料夾進入，`..` 回上一層。
+- 沒有開啟壓縮檔時即為檔案管理員模式，可瀏覽本機資料夾，雙擊壓縮檔即開啟。
+- 「尋找檔案…」（Ctrl+F）依名稱過濾目前的壓縮檔或資料夾。
+- 「我的最愛」可收藏目前位置（資料夾或壓縮檔）。清單儲存在使用者設定資料夾（Windows 為 `%APPDATA%\Archiver\favorites.txt`；設定 `ARCHIVER_CONFIG_DIR` 可改變位置）。
 
-### 預覽與複製（v0.6.0 起）
+### 解壓縮
 
-- 右側預覽窗格（工具列「預覽」或「選項」選單切換）：選取一個項目即即時預覽，不必先解壓縮
-  - 文字（UTF-8、UTF-8／UTF-16 BOM）最多顯示前 256 KiB；PNG／JPEG／SVG 圖片；其他檔案顯示十六進位傾印
-  - 資料夾顯示所含檔案數與總大小；多選時顯示選取數量
-  - 加密項目會提示先輸入壓縮檔密碼
-- 複製到剪貼簿（工具列「複製」、Ctrl+C、預覽窗格「複製檔案」）：選取的檔案／資料夾以「檔案」形式放上系統剪貼簿，可直接在檔案總管／Finder／檔案管理員貼上。已預覽完整內容的單一檔案立即複製，其他則先解壓到暫存資料夾（`%TEMP%rchiver-clipboard`，超過 24 小時自動清除）。文字或十六進位內容可用「複製文字」複製
-- 檔案管理員模式下亦可預覽本機檔案並複製到剪貼簿
+- 全部解壓縮，或只解壓縮選取的檔案與資料夾（保留壓縮檔內的目錄結構；選取資料夾時連同其內容一起解出）。
+- 需要密碼的壓縮檔會要求輸入密碼。
+- 批次解壓縮：「指令 → 分別解壓縮到各自資料夾」，或 CLI 的 `rarc xe`。單一項目失敗不會中斷整批，完成後顯示成功與失敗數。
+- 解壓縮時還原 ZIP、7z 內的修改時間；ZIP 解壓縮使用多執行緒。
 
-### 分批壓縮與解壓縮（v0.6.0 起）
+### 建立與修改
 
-- 分批壓縮：「指令 → 分批壓縮（各自建立壓縮檔）…」，或在建立壓縮檔對話框勾選「每個檔案／資料夾分別建立壓縮檔」；每個選取的檔案或資料夾各自成為一個壓縮檔，同名時自動改名為 `名稱 (2).zip`
-- 分批解壓縮：選取多個壓縮檔後「解壓縮到」會分別解到目標資料夾下各自的子資料夾；「指令 → 解壓縮到這裡」「分別解壓縮到各自資料夾」可一次處理多個壓縮檔
-- 某個項目失敗不會中斷整批，完成後顯示摘要（成功／失敗數與錯誤原因）；取消則停止其餘項目
+- 建立 ZIP、7z、TAR、TAR.GZ／TAR.BZ2／TAR.XZ／TAR.ZST，以及單一檔案的 GZ／BZ2／XZ／ZST。可設定壓縮等級。
+- 分批壓縮：每個選取的檔案或資料夾各自成為一個壓縮檔（建立對話框勾選「每個檔案／資料夾分別建立壓縮檔」，或 「指令 → 分批壓縮」）。
+- 加入檔案到既有壓縮檔：ZIP 直接附加；7z 與 TAR.* 會重寫整個壓縮檔，檔案大時較慢。
+- 刪除壓縮檔內的項目（ZIP、7z、TAR.*）。
+- 壓縮檔註解（僅 ZIP）：工具列「註解」。
+- 測試壓縮檔（完整性檢查）。
+- 防毒掃描（僅 Windows）：使用 Microsoft Defender 的 `MpCmdRun.exe` 掃描目前開啟的壓縮檔，只回報、不清除。找不到 Defender 時選單不會出現此項目。
+- 密碼：ZIP 與 7z 建立時使用 AES-256（7z 同時加密檔名標頭）；ZIP、7z、RAR 開啟時可輸入密碼。
 
-### 指定目的地與選取項目解壓縮（v0.6.1 起）
+### 預覽與剪貼簿
 
-- 檔案總管選取壓縮檔後，右鍵 → Archiver →「解壓縮至…」，可自行挑選輸出資料夾；取消選擇不會解壓縮。更新程式後請重新啟用「選項 → 右鍵選單整合…」，或執行 `archiver --register-shell`
-- 在 Archiver 開啟壓縮檔後，點選要解壓縮的檔案或資料夾（Ctrl/Shift 可多選），使用「解壓縮選取項目…」，或在選取項目上按右鍵 →「解壓縮至…」。只輸出選取項目，並保留壓縮檔內的目錄結構；選取資料夾會包含其內容
-- 右鍵點已選取的項目會保留多選；點未選取的項目會改選該項。需要整份壓縮檔時，使用「解壓縮全部…」；未選取項目時，選取項目解壓縮不會改成全部解壓縮
+- 預覽窗格（工具列「預覽」，或「選項 → 預覽窗格」）：不必解壓縮就能看內容。
+  - 文字（UTF-8，或含 BOM 的 UTF-8／UTF-16）最多顯示前 256 KiB。
+  - PNG、JPEG、SVG 圖片（32 MiB 以內）。
+  - 其他內容以十六進位顯示。
+  - 資料夾顯示檔案數與總大小；加密項目會先要求密碼。
+- 「複製」（工具列或 Ctrl+C）把選取的項目以檔案形式放上系統剪貼簿，可直接在檔案總管、Finder 或檔案管理員中貼上。需要時會先解壓到暫存資料夾（Windows：`%TEMP%\archiver-clipboard`；Linux／macOS：`~/.cache/archiver-clipboard`），啟動時會清除超過 24 小時的暫存內容。
+- 文字內容可用「複製文字」複製。
 
-### 一般
+### 鍵盤
 
-- 開啟壓縮檔並列出內容（名稱、大小、壓縮後大小、修改時間），支援搜尋過濾
-- 全部解壓縮或只解壓縮選取的檔案／資料夾（Ctrl/Shift 多選）
-- 從檔案或資料夾建立壓縮檔，可選擇格式與壓縮等級
-- ZIP / 7z 密碼（AES-256）加密與解密，RAR 密碼解壓
-- 背景執行緒處理，進度條與取消按鈕
-- 拖放：拖入壓縮檔即開啟，拖入一般檔案／資料夾即建立壓縮檔
-- 防止 zip-slip 路徑穿越攻擊
-- 附帶命令列工具 `rarc`
-- 右鍵選單整合：Windows 檔案總管、Linux（Nautilus / Dolphin / Nemo）、macOS Finder 快速動作
+| 按鍵 | 功能 |
+|---|---|
+| Enter | 進入所選資料夾或開啟所選項目 |
+| Backspace | 上一層 |
+| Delete | 刪除所選項目（可寫入的壓縮檔） |
+| Ctrl+A | 全選 |
+| ↑ ／ ↓ | 移動選取 |
+| Ctrl+O | 開啟壓縮檔 |
+| Ctrl+C | 複製到剪貼簿 |
+| Ctrl+F | 尋找檔案 |
+| F3 | 以預設程式檢視（會先解壓到暫存資料夾） |
+| F5 | 重新整理 |
+| Alt + 選單字母 | 開啟選單（F、C、S、O、N、H） |
 
-## 右鍵選單整合
+## Windows 右鍵選單
 
-在 GUI 按「選項 → 右鍵選單整合…」勾選啟用，或在終端機執行：
+安裝程式預設會加入右鍵選單。也可以在 Archiver 的「選項 → 右鍵選單整合…」勾選，或在終端機執行：
 
-```bash
-archiver --register-shell     # 安裝（僅目前使用者，不需系統管理員）
+```
+archiver --register-shell     # 安裝（目前使用者，不需系統管理員）
 archiver --unregister-shell   # 移除
 ```
 
-> 註冊時會記錄程式目前的路徑，搬移程式後請重新註冊。
->
-> 本專案原名 Rust Archiver（v0.2.0 以前）。執行 `archiver --register-shell` 會自動移除舊版「Rust Archiver」的右鍵選單項目，避免重複。
+在檔案總管中，項目會放在名為 **Archiver** 的子選單內。「壓縮檔」指 Archiver 認得的所有壓縮副檔名（見下方支援格式）；「其他檔案」與「資料夾」只會看到 04、07、08。
 
-| 系統 | 安裝內容 | 選單項目 |
-|---|---|---|
-| Windows | `HKCU\Software\Classes` 下的串接子選單：壓縮檔（`SystemFileAssociations\.zip` 等）、所有檔案（`*`）、資料夾（`Directory`） | 壓縮檔：開啟、解壓到這裡、解壓到資料夾\、解壓縮至…（自選目的地）、加入壓縮檔…；其他檔案與資料夾：加入壓縮檔… |
-| Linux | `~/.local/share/applications/archiver.desktop`（MIME 關聯 → 「以其他程式開啟」）、Nautilus 腳本（右鍵 → 腳本 → Archiver）、Dolphin 服務選單（KF6 `kio/servicemenus` 與 KF5 `kservices5/ServiceMenus`）、Nemo actions | 同上 |
-| macOS | `~/Library/Services/Archiver - *.workflow` 五個快速動作 | Finder 右鍵 → 快速動作（或「服務」）→ Archiver - … |
+| 編號 | 選單文字 | 執行的參數 | 適用對象 | 多選行為 |
+|---|---|---|---|---|
+| 01 | 以 Archiver 開啟 | `--open` | 壓縮檔 | 只在單選時顯示 |
+| 02 | 解壓縮到這裡 | `--extract-here` | 壓縮檔 | 合併成一次作業 |
+| 03 | 解壓縮到「壓縮檔名稱\」 | `--extract-to-folder` | 壓縮檔 | 合併成一次作業 |
+| 04 | 加入壓縮檔… | `--compress` | 壓縮檔、其他檔案、資料夾 | 合併成一個建立對話框 |
+| 05 | 解壓縮至… | `--extract-to` | 壓縮檔 | 合併，只選一次目的地 |
+| 06 | 測試壓縮檔 | `--test` | 壓縮檔 | 合併成一次作業 |
+| 07 | 壓縮成同名 .zip | `--compress-to zip` | 壓縮檔、其他檔案、資料夾 | 合併成一次作業 |
+| 08 | 壓縮成同名 .7z | `--compress-to 7z` | 壓縮檔、其他檔案、資料夾 | 合併成一次作業 |
+| 09 | 各自解壓縮到同名資料夾 | `--extract-to-folder` | 壓縮檔 | 合併成一次作業 |
 
-macOS：若快速動作沒有出現，到「系統設定 → 一般 → 登入項目與延伸功能 → Finder（或 鍵盤 → 鍵盤快速鍵 → 服務）」勾選。建議先把 `Archiver.app` 放到「應用程式」資料夾再註冊。
+說明：
 
-### 命令列參數（供右鍵選單使用）
+- **多選合併**：Explorer 會對每個選取的項目各啟動一次程式。Archiver 以 `--collect` 收集這些路徑，只開一個視窗、執行一次作業。收集的時間窗很短（約 250 毫秒無新項目即結束，最長等待 3 秒）。
+- **09 與 03**：在 Windows 上兩者執行相同的參數。09 保留是為了維持既有選單的編號。
+- **Windows 11**：新版右鍵選單不會顯示 Archiver 的完整項目。請點「顯示其他選項」（或按 Shift+F10／Shift+右鍵）。目前沒有提供新式選單所需的簽章套件。
+- **寫入位置**：只寫入 `HKEY_CURRENT_USER\Software\Classes\` 之下，不需系統管理員。包括：
+  - `SystemFileAssociations\.<副檔名>\shell\Archiver`：每個壓縮副檔名一組。
+  - `*\shell\Archiver`：其他檔案（以 AppliesTo 排除壓縮檔）。
+  - `Directory\shell\Archiver`：資料夾。
+  - 每個項目有 `MUIVerb`、`Icon`、`MultiSelectModel`；指令寫在 `command` 子鍵中，格式為 `"<archiver.exe 路徑>" --collect <參數> "%1"`（01 不含 `--collect`）。
+- 註冊前會先刪除上述根鍵再重建，因此舊版留下的項目會消失；註冊時也會移除 v0.2.0「Rust Archiver」的舊項目。
+- 註冊時寫入的是目前 exe 的完整路徑，搬移程式後請重新執行 `--register-shell`。
 
-```
-archiver <壓縮檔>                     開啟
-archiver --open <壓縮檔>
-archiver --extract-here <壓縮檔...>     解壓到壓縮檔所在資料夾，成功後自動關閉
-archiver --extract-to-folder <壓縮檔...> 解壓到「壓縮檔名稱」子資料夾
-archiver --extract-to <壓縮檔...>       開啟資料夾選擇視窗，解壓縮至指定目的地
-archiver --compress <檔案/資料夾...>     開啟建立壓縮檔視窗並預先填入
-```
+Linux 與 macOS 使用同一組動作，安裝的內容如下：
 
-解壓失敗（例如需要密碼）時會改為開啟該壓縮檔，輸入密碼後再解壓。
+| 系統 | 安裝內容 |
+|---|---|
+| Linux | `~/.local/share/applications/archiver.desktop`（MIME 關聯，「以其他程式開啟」）、Nautilus 腳本（`~/.local/share/nautilus/scripts/Archiver/`）、Dolphin 服務選單（KF6 與 KF5 路徑）、Nemo 動作 |
+| macOS | `~/Library/Services/Archiver - *.workflow`（Finder 快速動作）。若沒有出現，請到系統設定中確認已啟用 |
 
 ## 支援格式
 
-| 格式 | 建立 | 解壓 | 密碼 | 壓縮等級 |
-|------|:---:|:---:|:---:|:---:|
-| ZIP (Deflate) | ✅ | ✅ (Deflate/Deflate64/BZip2/LZMA/XZ/Zstd/PPMd) | ✅ AES-256（解壓也支援 ZipCrypto） | 0–9 |
-| 7z (LZMA2) | ✅ | ✅ | ✅ AES-256（含標頭加密） | 0–9 |
-| TAR | ✅ | ✅ | — | — |
-| TAR.GZ / TGZ | ✅ | ✅ | — | 0–9 |
-| TAR.BZ2 / TBZ2 | ✅ | ✅ | — | 1–9 |
-| TAR.XZ / TXZ | ✅ | ✅ | — | 0–9 |
-| TAR.ZST / TZST | ✅ | ✅ | — | 1–22 |
-| GZ / BZ2 / XZ / ZST（單一檔案） | ✅ | ✅ | — | 同上 |
-| RAR (v4 / v5) | ❌ | ✅ | ✅ | — |
+| 格式（副檔名） | 建立 | 解壓縮與測試 | 加入／刪除項目 | 密碼（建立／開啟） | 壓縮等級 |
+|---|:---:|:---:|:---:|:---:|:---:|
+| ZIP（`.zip`、`.jar`） | ✅ | ✅ | ✅（附加） | ✅ AES-256／✅ | 0–9 |
+| 7z（`.7z`） | ✅ | ✅ | ✅（重寫） | ✅ AES-256、含標頭加密／✅ | 0–9 |
+| TAR（`.tar`） | ✅ | ✅ | ✅（重寫） | — | 無 |
+| TAR.GZ（`.tar.gz`、`.tgz`） | ✅ | ✅ | ✅（重寫） | — | 0–9 |
+| TAR.BZ2（`.tar.bz2`、`.tbz2`、`.tbz`） | ✅ | ✅ | ✅（重寫） | — | 0–9 |
+| TAR.XZ（`.tar.xz`、`.txz`） | ✅ | ✅ | ✅（重寫） | — | 0–9 |
+| TAR.ZST（`.tar.zst`、`.tzst`） | ✅ | ✅ | ✅（重寫） | — | 1–22 |
+| GZ／BZ2／XZ／ZST（單一檔案） | ✅ | ✅ | ✗ | — | GZ／BZ2／XZ 為 0–9；ZST 為 1–22 |
+| RAR（`.rar`） | ✗ | ✅ | ✗ | —／✅ | 無 |
 
-> **為什麼不能建立 RAR？** RAR 壓縮演算法為 RARLAB 的專有格式，官方 UnRAR 原始碼授權只允許解壓縮，明文禁止用來重建 RAR 壓縮器，因此本程式只能解壓 RAR。
+> **為什麼不能建立 RAR？** RAR 壓縮演算法是 RARLAB 的專有格式，UnRAR 的授權只允許解壓縮，不允許重建 RAR 壓縮器，因此本程式只能讀取 RAR。
 
-## 下載
+## 命令列
 
-到 [Releases](https://github.com/stevenke1981/archiver/releases) 下載對應平台的檔案：
+### `archiver`（圖形介面程式）
 
-- Windows：**安裝程式 `archiver-setup-windows-x64.exe`**（建議）或免安裝版 `archiver-windows-x64.zip`
+```
+Usage: archiver [--collect] [OPTION] [FILES...]
+  <archive>                       open archive in the GUI
+  --open <archive>                open archive in the GUI
+  --extract-here <archives...>    extract next to each archive
+  --extract-to-folder <archives...>  extract into <dir>/<archive name>/
+  --extract-to <archives...>      choose a destination folder for extraction
+  --compress <files/folders...>   open the create-archive dialog prefilled
+  --compress-to <fmt> <files...>  compress next to the inputs without a dialog
+                                  (fmt: zip, 7z, tar, tar.gz, tar.bz2, tar.xz, tar.zst, gz, bz2, xz, zst)
+  --test <archives...>            test archive integrity
+  --screenshot <out.png> [--size WxH] [archive-or-folder]
+                                  render the main window to a PNG and exit
+  --collect                       (before an option) Explorer multi-select: merge the paths
+                                  passed by every process of one selection into a single run
+  --register-shell                install right-click menu integration (current user)
+  --unregister-shell              remove right-click menu integration
+  -h, --help                      show this help
+```
 
-- Linux：`archiver-linux-x64.tar.gz`（需 GTK3 執行環境供檔案對話框使用）
-- macOS：`archiver-macos-universal-app.zip`（`Archiver.app`，Apple Silicon + Intel 通用版，宣告了壓縮檔文件類型，可用「打開檔案的應用程式」）；`archiver-macos-universal.tar.gz` 為單純執行檔。未經公證，首次開啟請按右鍵 → 打開，或在「系統設定 → 隱私權與安全性」允許
+- 只給一個路徑時會開啟它；給多個一般路徑（例如拖到程式圖示上）會建立壓縮檔。
+- `--screenshot` 會以 CPU 繪製器把主視窗輸出為 PNG 後結束，預設大小 1100×720，不需要 GPU 或顯示器的視窗。
 
-### Windows 安裝程式（v0.5.1 起）
+### `rarc`（命令列工具）
 
-以 Inno Setup 製作，介面支援繁體中文與英文：
+```
+rarc [--json] <command>
 
-- 預設安裝到 `Program Files\Archiver`（需系統管理員）；也可在對話框選「只為我安裝」，不需管理員權限，安裝到 `%LOCALAPPDATA%\Programs\Archiver`
-- 開始功能表捷徑，可選桌面圖示
-- 可選：將 zip、7z、rar、tar、gz、tgz、bz2、xz、zst 等加入「開啟檔案」清單（檔案關聯）
-- 可選：加入檔案總管右鍵選單（安裝後執行 `archiver.exe --register-shell`）
-- 可選（預設不勾）：把 `rarc` 加入 PATH
-- 升級時直接覆蓋舊版，並自動關閉執行中的 Archiver；解除安裝會移除右鍵選單、檔案關聯與 PATH 設定
-- 靜默安裝：`archiver-setup-windows-x64.exe /VERYSILENT /SUPPRESSMSGBOXES /CURRENTUSER /TASKS=assoc,contextmenu`
+  l  <archive> [-p 密碼]                              列出內容
+  t  <archive> [-p 密碼]                              測試壓縮檔
+  x  <archive> [-o 輸出資料夾] [-p 密碼] [項目...]     解壓縮（可只解指定項目）
+  c  <輸出> <輸入...> [-l 等級] [-p 密碼]              建立（格式依輸出副檔名）
+  a  <壓縮檔> <輸入...> [--prefix 資料夾] [-l 等級] [-p 密碼]   加入檔案（同名項目會被取代）
+  comment show <壓縮檔>                               顯示註解（ZIP）
+  comment set <壓縮檔> -m "註解"                       設定註解（空字串會刪除）
+  ce <輸入...> -f <格式> [-o 輸出資料夾] [-l 等級] [-p 密碼]   分批壓縮（每個輸入各成一個壓縮檔）
+  xe <壓縮檔...> [-o 輸出資料夾] [-p 密碼]             分批解壓縮（各自解到 <壓縮檔名>/ 資料夾）
+```
 
-自行建置安裝程式：`cargo build --release` 後執行 `pwsh scripts/build-installer.ps1`（需 Inno Setup 6，腳本在 `installer/archiver.iss`）。
+範例：
+
+```
+rarc l archive.7z -p 密碼
+rarc x archive.rar -o 輸出資料夾
+rarc c out.tar.zst 資料夾 檔案.txt -l 19
+rarc a backup.zip 新檔案.txt --prefix docs
+rarc ce a.txt 照片 文件 -f zip -o 輸出資料夾
+rarc xe *.zip *.7z -o 輸出資料夾
+```
+
+**給程式使用**：加上 `--json` 時，每個命令在 stdout 輸出一份 JSON 文件（一行）。
+
+- `l`：`{"ok":true,"archive":…,"count":N,"entries":[{"name","size","compressed","modified","is_dir","crc32","encrypted"}]}`
+- `t`：`{"ok":true,"archive":…,"tested":N}`；`x`：`{"ok":true,"archive","out"}`；`c`：`{"ok":true,"output"}`；`a`：`{"ok":true,"archive","prefix","added"}`
+- `comment show`：`{"ok":true,"archive","comment"}`（沒有註解時為 null）；`comment set`：`{"ok":true,"archive"}`
+- `ce`／`xe`：`{"ok","total","failed","results":[{"input","output","ok","error","kind"}]}`
+- 失敗：`{"ok":false,"error":"…","kind":"…"}`，其中 kind 為 `password`、`io`、`unsupported`、`cancelled`、`not_found`、`format` 之一。
+
+**結束代碼**
+
+| 代碼 | 意義 |
+|:---:|---|
+| 0 | 成功 |
+| 1 | 失敗 |
+| 2 | 用法錯誤（參數不正確；由 clap 輸出到 stderr） |
+| 3 | 需要密碼，或密碼錯誤 |
+| 4 | 批次部分失敗（`ce`、`xe`：有的成功、有的失敗） |
+
+`ce`、`xe` 全部失敗時，若失敗原因都是密碼問題則回傳 3，否則回傳 1。
 
 ## 從原始碼建置
 
-```bash
-# Linux 需先安裝：
-sudo apt install build-essential pkg-config libgtk-3-dev libxkbcommon-dev libgl1-mesa-dev libwayland-dev
-cargo build --release
-cargo test
-./target/release/archiver [壓縮檔]
+### 需求
+
+- Rust 1.85 以上（專案使用 edition 2024）。CI 使用 stable。
+- **Windows**：需要 MSVC 工具鏈與 Visual Studio Build Tools。若預設工具鏈是 GNU（`-gnu`），連結可能失敗，建議：
+
+  ```
+  rustup toolchain install stable-x86_64-pc-windows-msvc
+  cargo +stable-x86_64-pc-windows-msvc build --release
+  ```
+
+- **Linux**（與 CI 相同的套件）：
+
+  ```
+  sudo apt-get install -y --no-install-recommends pkg-config libgtk-3-dev \
+    libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libwayland-dev libfontconfig1-dev
+  ```
+
+- **macOS**：Xcode Command Line Tools。通用版 `.app` 使用 `scripts/macos-bundle.sh`（同時建置 arm64 與 x86_64）。
+- **C/C++ 編譯器**：RAR 讀取使用 `unrar` crate，內含 UnRAR 的 C++ 原始碼。
+
+### 指令
+
+```
+cargo build --release --locked
+cargo test --workspace --locked
+cargo clippy --workspace --all-targets --locked -- -D warnings
 ```
 
-## 命令列 `rarc`
+- 建置結果：`target/release/archiver`（Windows 為 `archiver.exe`）與 `rarc`。
+- 自行打包 Windows 安裝程式：先 `cargo build --release`，再執行 `pwsh scripts/build-installer.ps1`。需要 Inno Setup 6（找不到時會嘗試以 choco 安裝），輸出到 `dist\archiver-setup-windows-x64.exe`。
 
-```bash
-rarc l archive.7z -p 密碼          # 列出內容
-rarc x archive.rar -o 輸出資料夾     # 解壓（可在後面列出指定項目）
-rarc c out.tar.zst 資料夾 檔案 -l 19  # 建立（格式依副檔名決定）
-rarc ce a.txt 照片 文件 -f zip -o 輸出資料夾   # 分批壓縮：每個輸入各自成為一個壓縮檔
-rarc xe *.zip *.7z -o 輸出資料夾              # 分批解壓縮：各自解到 輸出資料夾/<壓縮檔名>/（不加 -o 則解到壓縮檔旁）
-```
+### AcmeUI-Native 相依
 
-## 效能
+GUI 相依於 AcmeUI-Native 的 git 版本，已釘定在 `c2e0fd9765d0f25119a240ad1adb378c045df63f`（見 `gui/Cargo.toml`）。第一次建置需要能連到 GitHub。
 
-v0.4.0 起使用多執行緒：xz（liblzma MT）、zstd（zstdmt）、7z（固實 + 多執行緒 LZMA2 壓縮與解壓）、平行 ZIP（各檔案分組平行壓縮後直接合併）、平行 gzip（4 MiB 區塊、標準多成員 gzip）。
-以約 490 MB 混合資料、8 核心測試：7z 壓縮 292 秒 → 46 秒、tar.xz 285 → 41 秒、zip 10.5 → 2.4 秒、tar.gz 9.4 → 1.6 秒；詳見 [bench/README.md](bench/README.md)。
-v0.6.0 起 ZIP 解壓縮亦多執行緒平行處理（大於 8 MiB 時），只解壓選取項目時不再開啟未選取的項目；解壓時保留 ZIP／7z 檔案的修改時間。以約 209 MB、1569 個檔案、24 執行緒測試：一般 ZIP 解壓 1.16 → 0.78 秒，AES 加密 ZIP 2.2 → 0.8 秒。
-多執行緒 7z / xz 壓縮時記憶體用量較高（約 1.2–1.4 GB）；可用環境變數 `ARCHIVER_THREADS=2` 限制執行緒數。
+### 渲染後端
+
+由環境變數 `ACME_RENDER_BACKEND` 選擇，可設為 `auto`、`gpu` 或 `cpu`（預設 `auto`）：
+
+- `auto`：先使用 GPU（wgpu）；無法使用時退回 CPU 軟體繪製。
+- `gpu`：優先使用 GPU，同樣會退回 CPU。
+- `cpu`：強制使用 CPU 繪製。
+
+沒有顯示卡或在遠端桌面中遇到問題時，可以設定 `ACME_RENDER_BACKEND=cpu`（PowerShell：`$env:ACME_RENDER_BACKEND = 'cpu'`）。`--screenshot` 一律使用 CPU 繪製。
+
+### 測試
+
+`cargo test --workspace` 包含：
+
+- `core` 的壓縮與解壓縮測試。
+- GUI 狀態機測試（`gui/src/tests.rs`），不需要開啟視窗。
+- 右鍵選單登錄測試（Windows 版在暫存的登錄路徑上執行）與多選合併測試。
+- `rarc` 的整合測試（`gui/tests/rarc_cli.rs`）。
+
+剪貼簿測試預設略過（需要顯示環境與系統剪貼簿）。
 
 ## 專案結構
 
-- `core/` — `archiver-core` 函式庫：格式偵測、列出、解壓、建立
-- `gui/` — `archiver` GUI 程式與 `rarc` CLI
+```
+core/                     archiver-core 函式庫（格式偵測、列出、解壓、測試、建立、加入／刪除、註解、批次）
+  src/lib.rs              Format、Error、Entry、Progress 與公開 API
+  src/archive_ops.rs      列出、解壓縮、測試、刪除
+  src/create.rs           建立壓縮檔
+  src/edit.rs             註解與加入檔案
+  src/batch.rs            批次壓縮與解壓縮
+  src/preview.rs          預覽用的單一項目讀取
+gui/                      archiver（圖形介面）與 rarc（命令列）
+  src/main.rs             進入點：參數分派、--screenshot、事件迴圈（App 實作 AcmeUI Application）
+  src/args.rs             命令列參數解析與說明文字
+  src/app/                狀態機
+    model.rs              Model：所有狀態
+    msg.rs                Msg、Cmd、按鍵與對話框訊息
+    update.rs             update()：狀態轉換
+    effects.rs            Effects 介面與 RealEffects（檔案對話框、執行緒、喚醒）
+    menus.rs              選單與右鍵選單的內容（資料）
+    worker.rs             背景工作輔助
+  src/ui/                 即時模式繪製：版面、對話框、元件、文字、圖示
+  src/shell.rs            右鍵選單：Windows 登錄、Linux 與 macOS 檔案產生
+  src/collect.rs          Explorer 多選合併
+  src/favorites.rs        我的最愛
+  src/scan.rs             Microsoft Defender 掃描（Windows）
+  src/view.rs             清單資料、暫存與剪貼簿資料夾
+  src/preview.rs          預覽內容分類（文字、圖片、十六進位）
+  src/clipboard.rs        系統剪貼簿（檔案與文字）
+  src/os.rs               以預設程式開啟檔案、系統深淺色偵測
+  src/tests.rs            GUI 狀態機測試
+  src/bin/rarc.rs         rarc 命令列工具
+  tests/rarc_cli.rs       rarc 整合測試
+  assets/                 SVG 圖示與 Windows 圖示
+  build.rs                Windows 資源（圖示）
+installer/                Inno Setup 腳本
+scripts/                  安裝程式與 macOS 打包腳本、安裝程式煙霧測試
+bench/                    效能測試腳本與說明
+docs/                     截圖、圖示與變更紀錄（CHANGELOG.md）
+.github/workflows/        CI 與 Release
+```
 
 ## 已知限制
 
-- RAR 僅能解壓（授權限制）；RAR 解壓使用 `unrar` crate（內含 C++ UnRAR 原始碼，建置時需 C++ 編譯器）
-- 不支援分卷壓縮檔的建立；7z 分卷與自解壓檔（SFX）尚未支援
-- 不支援直接在壓縮檔內新增／刪除檔案（需重新建立）
-- 單一檔案格式（.gz/.bz2/.xz/.zst）一次只能壓縮一個檔案，多檔請用 TAR.* 格式
-- Windows 右鍵選單：選取多個檔案時，Windows 會對每個檔案各啟動一次程式（「加入壓縮檔」會開多個視窗）；Windows 11 需點「顯示更多選項」才看得到（傳統選單），「解壓到資料夾\」無法動態顯示壓縮檔名稱
-- macOS「打開檔案的應用程式」/ 雙擊：檔案是以 Apple Event 傳遞，目前 eframe/winit 未提供此事件，所以 App 會啟動但不會自動載入檔案；請改用 Finder 快速動作或拖放到視窗
-- 快速動作與 Linux 檔案管理員整合僅以產生檔案與格式驗證測試，未在實際桌面上點擊測試
-- 預覽：Big5／GBK 等非 UTF 編碼文字以十六進位顯示；圖片僅支援 PNG／JPEG／SVG（32 MiB 以內）；RAR 大型項目預覽需先解到暫存資料夾
-- 分批解壓縮到同一目標時，主檔名相同的壓縮檔（如 `a.zip` 與 `a.7z`）會解到同一個資料夾
+- **RAR 只能讀取**（授權限制）。不支援建立分卷壓縮檔；7z 分卷與自解壓（SFX）檔也不支援。
+- **單一檔案格式**（GZ、BZ2、XZ、ZST）不能加入或刪除項目；需要多個檔案時請使用 TAR.* 或 ZIP、7z。
+- **Windows 右鍵選單**：
+  - Explorer 會對每個選取項目各啟動一次程式，合併依賴短暫的時間窗；系統極慢時仍可能分成多個視窗或作業。
+  - Windows 11 的新式選單不顯示 Archiver 項目，需要「顯示其他選項」。
+  - 03、09 兩個選單項目在 Windows 上執行相同參數。
+  - 「解壓縮到「壓縮檔名稱\」」是固定文字，無法依實際選取的壓縮檔動態改名。
+- **macOS「以 Archiver 開啟」／雙擊**：App 會啟動，但不會自動載入檔案，因為 winit 0.30（本專案鎖定版本）沒有提供開啟檔案的事件。請改用 Finder 快速動作，或把檔案拖進視窗。
+- **Linux 與 macOS 的檔案管理員整合**（Nautilus、Dolphin、Nemo、Finder 快速動作）只以產生檔案內容與格式的測試驗證，尚未在實際桌面上逐一點擊測試。
+- **防毒掃描**只支援 Windows Defender，只回報、不清除。
+- **註解**只支援 ZIP。
+- **預覽**：非 UTF 編碼的文字（例如 Big5、GBK）以十六進位顯示；圖片限 PNG、JPEG、SVG。
+- **輸入法**：注音輸入法在 AcmeUI 文字欄位中尚未實機驗證。
+- **介面語言**目前只有繁體中文。
+- **macOS** 的 App 採 ad-hoc 簽章、未經 Apple 公證。
 
-## License
+## 效能
 
-MIT
+v0.4 的測試（Linux x86_64，8 核心，約 490 MB 混合資料）：7z 建立 292 秒 → 46 秒，tar.xz 285 秒 → 41 秒，zip 10.5 秒 → 2.4 秒，tar.gz 9.4 秒 → 1.6 秒，tar.zst 2.0 秒 → 0.55 秒。多執行緒的 7z、xz 壓縮記憶體用量較高（約 1.2–1.4 GB）；可設定環境變數 `ARCHIVER_THREADS` 限制執行緒數。完整數據與方法見 [bench/README.md](bench/README.md)。
+
+## 授權
+
+MIT License，見 [LICENSE](LICENSE)。
 
 ---
 
 ## English summary
 
-**Archiver** (GUI rewritten in Slint in v0.5.0 with a WinRAR-style main window: menu bar, large-icon toolbar with original SVG icons — Add, Extract To, Test, View, Delete, Find, Wizard, Info — path bar with up button, sortable file list with Name/Size/Packed/Type/Modified/CRC32, folder navigation inside archives, file-manager mode when no archive is open, status bar) is a WinRAR-like, cross-platform (Windows/Linux/macOS) archive manager with a Rust core library and a Slint GUI.
-It can open and list archives, extract all or selected entries, and create ZIP, 7z, TAR, TAR.GZ/BZ2/XZ/ZST and single-file GZ/BZ2/XZ/ZST archives with selectable compression level.
-ZIP and 7z support AES-256 passwords; RAR (v4/v5) is **extract-only** because the RAR compression format is proprietary and the UnRAR license forbids re-creating a RAR compressor.
-Work runs on a background thread with a progress bar and cancel button; drag-and-drop opens archives or adds files to a new archive.
-A small CLI (`rarc`) is included.
+**Archiver** is a cross-platform (Windows, Linux, macOS) archive manager with a WinRAR-style window. The workspace has three parts: `archiver-core` (library), `archiver` (GUI, built on AcmeUI-Native), and `rarc` (command-line tool). Release notes are in [docs/CHANGELOG.md](docs/CHANGELOG.md).
 
-*Formerly "Rust Archiver" (≤ v0.2.0); the GUI binary is now `archiver`. `--register-shell` also removes the old "Rust Archiver" menu entries so you don't get duplicates.*
+- **Formats**: create ZIP, 7z, TAR (with gz, bz2, xz, zst) and single-file gz, bz2, xz, zst archives. ZIP and 7z support AES-256 passwords. RAR is read-only because the UnRAR license forbids creating RAR archives.
+- **Features**: list, test, extract (all or selected entries), add and delete entries in ZIP, 7z and TAR archives, ZIP comments, live preview, copy to the system clipboard, batch compress and extract, favorites, drag and drop, and Microsoft Defender scanning on Windows.
+- **Shell integration** (current user, no admin): Windows Explorer submenu under HKCU; Nautilus, Dolphin and Nemo on Linux; Finder Quick Actions on macOS. Install with `archiver --register-shell`. Multi-selection runs as a single operation.
+- **CLI**: `rarc` supports `--json` for every command and fixed exit codes: 0 ok, 1 failed, 2 usage error, 3 password required or wrong, 4 partial batch failure.
+- **Build**: Rust 1.85 or newer. On Windows use the MSVC toolchain. `cargo build --release --locked`. The renderer uses wgpu and falls back to the CPU; set `ACME_RENDER_BACKEND=auto|gpu|cpu` to choose.
+- **Limitations**: RAR is extract-only; no multi-volume or SFX creation; on macOS, "Open With" starts the app without loading the file (winit 0.30 has no open-file event); on Windows 11 the context menu needs "Show more options"; the GUI text is Traditional Chinese only. See the 已知限制 section above.
 
-**Performance (v0.4.0):** multi-threaded xz, zstd, 7z (solid, MT LZMA2 encode/decode), parallel ZIP entry compression and parallel multi-member gzip, larger I/O buffers, fat LTO. On a ~490 MB mixed set with 8 cores: 7z create 292 s → 46 s, tar.xz 285 s → 41 s, zip 10.5 s → 2.4 s, tar.gz 9.4 s → 1.6 s (see `bench/`). Multi-threaded 7z/xz use ~1.2–1.4 GB RAM; set `ARCHIVER_THREADS` to limit.
-
-**Context-menu integration** (`archiver --register-shell`, `--unregister-shell`, or the "⚙ Shell menu" toggle in the GUI; current user only, no admin):
-Windows Explorer cascading "Archiver" submenu via HKCU registry (Open / Extract here / Extract to folder\ / Add to archive… for archives; Add to archive… for other files and folders);
-Linux `.desktop` MIME associations plus Nautilus scripts, Dolphin service menus and Nemo actions;
-macOS Finder Quick Actions in `~/Library/Services`. The app accepts `--open`, `--extract-here`, `--extract-to-folder`, `--extract-to` (choose a destination) and `--compress` with multiple files.
-
-**Selective extraction:** right-click a file or folder in the archive manager and choose "解壓縮至…", or use "解壓縮選取項目…". Ctrl/Shift multi-selection is preserved when right-clicking a selected row. Empty selection never falls back to extracting the entire archive; use "解壓縮全部…" for that.
-The macOS release ships a universal (arm64 + x86_64) `Archiver.app` with archive document types declared. Limitations: Windows launches one process per selected file; macOS "Open With" launches the app but the file is not loaded (Apple Events are not exposed by eframe) — use the Quick Actions or drag-and-drop. Prebuilt binaries are on the Releases page.
-
-**Preview & copy (v0.6.0):** a live preview pane shows the selected entry without extracting it (text up to 256 KiB, PNG/JPEG/SVG images, hex dump otherwise, folder summaries); Copy / Ctrl+C puts the selected entries on the system clipboard as files, ready to paste into Explorer/Finder/file managers. **Batch (v0.6.0):** compress each selected file/folder into its own archive (unique names), extract many archives at once (here, into per-archive folders, or into a chosen folder); failures do not stop the batch and a summary is shown. CLI: `rarc ce` / `rarc xe`. Parallel ZIP extraction, partial ZIP extraction never opens unselected entries, ZIP/7z modification times are restored. New keys: arrows, Ctrl+C, Ctrl+F, F3, F5.
-
-**Windows installer (v0.5.1):** `archiver-setup-windows-x64.exe` (Inno Setup, Traditional Chinese / English UI). Installs `archiver.exe` and `rarc.exe` to `Program Files\Archiver`, or per-user without admin (`%LOCALAPPDATA%\Programs\Archiver`, chosen in a dialog or with `/CURRENTUSER`). Start-menu shortcut, optional desktop icon, optional "Open with" associations for zip/7z/rar/tar/gz/tgz/bz2/xz/zst…, optional Explorer context menu (runs `--register-shell`), optional `rarc` on PATH (off by default). Upgrades in place and closes a running Archiver; the uninstaller removes the context menu, associations and PATH entry. The executables now carry the app icon. Build it yourself with `pwsh scripts/build-installer.ps1` after `cargo build --release`. Licensed under MIT.
