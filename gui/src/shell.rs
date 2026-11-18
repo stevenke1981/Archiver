@@ -54,14 +54,7 @@ pub const COMMANDS: &[(&str, &str, &str, bool)] = &[
     ("test", "Test archive", "--test", true),
     ("compresszip", "Compress to .zip", "--compress-to zip", false),
     ("compress7z", "Compress to .7z", "--compress-to 7z", false),
-    // Windows only (it duplicates "Extract to folder" on file managers that list files individually)
-    ("extracteach", "Extract each to its own folder", "--extract-to-folder", true),
 ];
-
-/// Commands offered on Linux / macOS (everything except the Windows-only ones).
-fn portable() -> impl Iterator<Item = &'static (&'static str, &'static str, &'static str, bool)> {
-    COMMANDS.iter().filter(|c| c.0 != "extracteach")
-}
 
 /// Windows menu label (Traditional Chinese).
 fn win_label(id: &str) -> &'static str {
@@ -74,7 +67,6 @@ fn win_label(id: &str) -> &'static str {
         "test" => "測試壓縮檔",
         "compresszip" => "壓縮成同名 .zip",
         "compress7z" => "壓縮成同名 .7z",
-        "extracteach" => "各自解壓縮到同名資料夾",
         _ => "Archiver",
     }
 }
@@ -86,24 +78,58 @@ fn separator_before(id: &str) -> bool {
 
 // ------------------------------------------------------------------ Windows
 
-/// A registry key (relative to HKCU) and its string values ("" = default value).
+/// A registry value: REG_SZ or REG_DWORD.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RegVal {
+    Str(String),
+    Dword(u32),
+}
+
+impl RegVal {
+    pub fn as_str(&self) -> &str {
+        match self {
+            RegVal::Str(s) => s,
+            RegVal::Dword(_) => "",
+        }
+    }
+}
+
+impl From<&str> for RegVal {
+    fn from(s: &str) -> Self {
+        RegVal::Str(s.to_string())
+    }
+}
+
+impl From<String> for RegVal {
+    fn from(s: String) -> Self {
+        RegVal::Str(s)
+    }
+}
+
+impl PartialEq<&str> for RegVal {
+    fn eq(&self, o: &&str) -> bool {
+        matches!(self, RegVal::Str(s) if s == o)
+    }
+}
+
+/// A registry key (relative to HKCU) and its values ("" = default value).
 #[derive(Debug, Clone, PartialEq)]
 pub struct RegKey {
     pub path: String,
-    pub values: Vec<(String, String)>,
+    pub values: Vec<(String, RegVal)>,
 }
 
 pub fn windows_keys(exe: &str, base: &str) -> Vec<RegKey> {
     let mut keys = Vec::new();
     let menu = |keys: &mut Vec<RegKey>, root: String, archive: bool, applies_to: Option<String>| {
         let mut vals = vec![
-            ("MUIVerb".to_string(), APP_NAME.to_string()),
-            ("SubCommands".to_string(), String::new()),
-            ("Icon".to_string(), format!("\"{exe}\",0")),
-            ("MultiSelectModel".to_string(), "Player".to_string()),
+            ("MUIVerb".to_string(), APP_NAME.into()),
+            ("SubCommands".to_string(), "".into()),
+            ("Icon".to_string(), format!("\"{exe}\",0").into()),
+            ("MultiSelectModel".to_string(), "Player".into()),
         ];
         if let Some(a) = applies_to {
-            vals.push(("AppliesTo".into(), a));
+            vals.push(("AppliesTo".into(), a.into()));
         }
         keys.push(RegKey { path: root.clone(), values: vals });
         for (i, (id, label, flag, arc_only)) in COMMANDS.iter().enumerate() {
@@ -114,18 +140,19 @@ pub fn windows_keys(exe: &str, base: &str) -> Vec<RegKey> {
             let sub = format!("{root}\\shell\\{:02}{id}", i + 1);
             let single = *id == "open"; // opens one archive; other verbs aggregate the selection
             let mut vals = vec![
-                ("MUIVerb".to_string(), win_label(id).to_string()),
-                ("Icon".to_string(), format!("\"{exe}\",0")),
-                ("MultiSelectModel".to_string(), if single { "Single" } else { "Player" }.to_string()),
+                ("MUIVerb".to_string(), win_label(id).into()),
+                ("Icon".to_string(), format!("\"{exe}\",0").into()),
+                ("MultiSelectModel".to_string(), if single { "Single" } else { "Player" }.into()),
             ];
             if separator_before(id) {
-                vals.push(("CommandFlags".into(), "0x20".into()));
+                // ECF_SEPARATORBEFORE; Explorer ignores it unless it is a REG_DWORD
+                vals.push(("CommandFlags".into(), RegVal::Dword(0x20)));
             }
             keys.push(RegKey { path: sub.clone(), values: vals });
             let collect = if single { "" } else { "--collect " };
             keys.push(RegKey {
                 path: format!("{sub}\\command"),
-                values: vec![(String::new(), format!("\"{exe}\" {collect}{flag} \"%1\""))],
+                values: vec![(String::new(), format!("\"{exe}\" {collect}{flag} \"%1\"").into())],
             });
         }
     };
@@ -164,7 +191,10 @@ mod win {
         for k in windows_keys(exe, base) {
             let (key, _) = hkcu.create_subkey(&k.path)?;
             for (n, v) in &k.values {
-                key.set_value(n, v)?;
+                match v {
+                    RegVal::Str(s) => key.set_value(n, s)?,
+                    RegVal::Dword(d) => key.set_value(n, d)?,
+                }
             }
         }
         notify();
@@ -250,7 +280,7 @@ Actions=ExtractHere;ExtractToFolder;ExtractTo;Test;Compress;CompressZip;Compress
     ));
 
     // 2) Nautilus (GNOME Files) scripts -> Scripts > Archiver > ...
-    for (_, label, flag, _) in portable() {
+    for (_, label, flag, _) in COMMANDS.iter() {
         let body = if *flag == "--open" {
             format!("#!/bin/sh\n# Archiver Nautilus script\nfor f in \"$@\"; do {} --open \"$f\" & done\n", sh_quote(exe))
         } else {
@@ -283,7 +313,7 @@ X-KDE-Submenu={APP_NAME}\nX-KDE-Priority=TopLevel\n\n\
 
     // 4) Nemo (Cinnamon) actions
     let exts = archiver_core::archive_extensions().join(";");
-    for (id, label, flag, arc_only) in portable() {
+    for (id, label, flag, arc_only) in COMMANDS.iter() {
         let (sel, filter) = if *arc_only {
             (if *flag == "--open" { "s" } else { "notnone" }, format!("Extensions={exts};"))
         } else {
@@ -335,7 +365,7 @@ pub fn macos_workflow_name(label: &str) -> String {
 /// Generate Quick Action bundles: files under ~/Library/Services/<name>.workflow/Contents/.
 pub fn macos_files(exe: &str) -> Vec<GenFile> {
     let mut out = Vec::new();
-    for (_, label, flag, arc_only) in portable() {
+    for (_, label, flag, arc_only) in COMMANDS.iter() {
         let name = macos_workflow_name(label);
         let dir = PathBuf::from(format!("Library/Services/{name}.workflow/Contents"));
         let types: Vec<&str> = if *arc_only { ARCHIVE_UTIS.to_vec() } else { vec!["public.item"] };
@@ -513,7 +543,7 @@ pub fn macos_files(exe: &str) -> Vec<GenFile> {
 }
 
 fn macos_extra_dirs() -> Vec<PathBuf> {
-    portable().map(|(_, l, _, _)| PathBuf::from(format!("Library/Services/{}.workflow", macos_workflow_name(l)))).collect()
+    COMMANDS.iter().map(|(_, l, _, _)| PathBuf::from(format!("Library/Services/{}.workflow", macos_workflow_name(l)))).collect()
 }
 
 // ------------------------------------------------------------------ file install helpers
@@ -722,10 +752,10 @@ mod tests {
         let open = find(r"Software\Classes\SystemFileAssociations\.zip\shell\Archiver\shell\01open\command");
         assert_eq!(open.values[0].1, r#""C:\Program Files\RA\archiver.exe" --open "%1""#);
         // new verbs, in order, with icon + multi-select model
-        let verbs = ["01open", "02extracthere", "03extractto", "04compress", "05extractdest", "06test", "07compresszip", "08compress7z", "09extracteach"];
+        let verbs = ["01open", "02extracthere", "03extractto", "04compress", "05extractdest", "06test", "07compresszip", "08compress7z"];
         for v in verbs {
             let k = find(&format!(r"Software\Classes\SystemFileAssociations\.zip\shell\Archiver\shell\{v}"));
-            assert!(k.values.iter().any(|(n, x)| n == "Icon" && x.contains("archiver.exe")), "{v}");
+            assert!(k.values.iter().any(|(n, x)| n == "Icon" && x.as_str().contains("archiver.exe")), "{v}");
             assert!(k.values.iter().any(|(n, _)| n == "MultiSelectModel"), "{v}");
         }
         assert!(zip.values.contains(&("MultiSelectModel".into(), "Player".into())));
@@ -736,8 +766,9 @@ mod tests {
         assert_eq!(cz.values[0].1, r#""C:\Program Files\RA\archiver.exe" --collect --compress-to zip "%1""#);
         let c7 = find(r"Software\Classes\Directory\shell\Archiver\shell\08compress7z");
         assert!(c7.values.contains(&("MUIVerb".into(), "壓縮成同名 .7z".into())));
-        let each = find(r"Software\Classes\SystemFileAssociations\.rar\shell\Archiver\shell\09extracteach\command");
-        assert!(each.values[0].1.ends_with(r#"--collect --extract-to-folder "%1""#));
+        assert!(!keys.iter().any(|k| k.path.contains("extracteach")), "duplicate verb must be gone");
+        let sep = find(r"Software\Classes\SystemFileAssociations\.zip\shell\Archiver\shell\06test");
+        assert!(sep.values.contains(&("CommandFlags".into(), RegVal::Dword(0x20))), "CommandFlags must be REG_DWORD");
         let ex3 = find(r"Software\Classes\SystemFileAssociations\.zip\shell\Archiver\shell\03extractto");
         assert!(ex3.values.contains(&("MUIVerb".into(), "解壓縮到「壓縮檔名稱\\」".into())));
         find(r"Software\Classes\SystemFileAssociations\.rar\shell\Archiver\shell\03extractto\command");
@@ -747,7 +778,7 @@ mod tests {
         assert_eq!(chooser_cmd.values[0].1, r#""C:\Program Files\RA\archiver.exe" --collect --extract-to "%1""#);
         // generic files and folders only get "Add to archive"
         let star = find(r"Software\Classes\*\shell\Archiver");
-        assert!(star.values.iter().any(|(n, v)| n == "AppliesTo" && v.contains("System.FileExtension:=.zip")));
+        assert!(star.values.iter().any(|(n, v)| n == "AppliesTo" && v.as_str().contains("System.FileExtension:=.zip")));
         find(r"Software\Classes\Directory\shell\Archiver\shell\04compress\command");
         assert!(!keys.iter().any(|k| k.path.starts_with(r"Software\Classes\Directory") && k.path.contains("06test")));
         assert!(!keys.iter().any(|k| k.path.starts_with(r"Software\Classes\Directory") && k.path.contains("extract")));
@@ -808,7 +839,7 @@ mod tests {
     #[test]
     fn macos_quick_actions() {
         let files = macos_files("/Applications/Archiver.app/Contents/MacOS/archiver");
-        assert_eq!(files.len(), portable().count() * 2);
+        assert_eq!(files.len(), COMMANDS.len() * 2);
         let info = files.iter().find(|f| f.0.ends_with("Archiver - Extract here.workflow/Contents/Info.plist")).unwrap();
         assert!(info.1.contains("runWorkflowAsService") && info.1.contains("public.zip-archive"));
         let add = files.iter().find(|f| f.0.ends_with("Archiver - Add to archive.workflow/Contents/Info.plist")).unwrap();

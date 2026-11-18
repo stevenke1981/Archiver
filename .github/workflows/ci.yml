@@ -63,7 +63,7 @@ jobs:
           fi
           $B --register-shell
           if [ "$RUNNER_OS" = "Windows" ]; then
-            ! reg query 'HKCU\Software\Classes\Directory\shell\RustArchiver' 2>/dev/null
+            if reg query 'HKCU\Software\Classes\Directory\shell\RustArchiver' >/dev/null 2>&1; then echo "legacy verb survived"; exit 1; fi
           else
             test ! -e ~/.local/share/applications/rust-archiver.desktop
             test ! -e ~/.local/share/nautilus/scripts/"Rust Archiver"
@@ -76,34 +76,39 @@ jobs:
                      reg query "$K\shell\06test\command" /ve | grep -q -- '--collect --test'
                      reg query "$K\shell\07compresszip\command" /ve | grep -q -- '--compress-to zip'
                      reg query "$K\shell\08compress7z\command" /ve | grep -q -- '--compress-to 7z'
-                     reg query "$K\shell\09extracteach\command" /ve
                      reg query "$K\shell\06test" /v MultiSelectModel | grep -q Player
+                     reg query "$K\shell\06test" /v CommandFlags | grep -q 'REG_DWORD'
                      reg query "$K\shell\06test" /v Icon
                      reg query 'HKCU\Software\Classes\Directory\shell\Archiver' /v MultiSelectModel | grep -q Player
                      reg query 'HKCU\Software\Classes\Directory\shell\Archiver\shell\07compresszip\command' /ve
                      # re-registering must not leave stale verbs behind
                      reg add "$K\shell\99stale" /ve /d x /f
                      $B --register-shell
-                     ! reg query "$K\shell\99stale" 2>/dev/null ;;
+                     if reg query "$K\shell\99stale" >/dev/null 2>&1; then echo "stale verb survived"; exit 1; fi ;;
             macOS)   ls -R ~/Library/Services | grep "Archiver - "
                      plutil -lint ~/Library/Services/Archiver\ -\ *.workflow/Contents/Info.plist ~/Library/Services/Archiver\ -\ *.workflow/Contents/document.wflow ;;
             Linux)   cat ~/.local/share/applications/archiver.desktop
                      ls -la ~/.local/share/nautilus/scripts/"Archiver" ~/.local/share/nemo/actions ;;
           esac
           $B --unregister-shell
-          if [ "$RUNNER_OS" = "Windows" ]; then ! reg query 'HKCU\Software\Classes\Directory\shell\Archiver' 2>/dev/null; fi
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            if reg query 'HKCU\Software\Classes\Directory\shell\Archiver' >/dev/null 2>&1; then echo "verb survived unregister"; exit 1; fi
+          fi
       - name: GUI screenshot (headless, CPU rasteriser)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          & target\release\archiver.exe --screenshot docs/screenshot.png --size 1100x720
-          if ($LASTEXITCODE -ne 0) { throw "archiver --screenshot failed ($LASTEXITCODE)" }
-          if ((Get-Item docs/screenshot.png).Length -lt 5000) { throw "screenshot looks blank" }
+          # archiver.exe is a GUI-subsystem binary: '&' neither waits nor sets $LASTEXITCODE
+          $shot = Join-Path $env:RUNNER_TEMP 'shot.png'
+          $p = Start-Process target\release\archiver.exe -ArgumentList '--screenshot', $shot, '--size', '1100x720' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "archiver --screenshot failed ($($p.ExitCode))" }
+          if (-not (Test-Path $shot) -or (Get-Item $shot).Length -lt 5000) { throw "screenshot missing or blank" }
+          "SHOT=$shot" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - uses: actions/upload-artifact@v4
         if: runner.os == 'Windows' && always()
         with:
           name: windows-gui-screenshot
-          path: docs/screenshot.png
+          path: ${{ env.SHOT }}
           if-no-files-found: ignore
       - name: Build Windows installer (Inno Setup)
         if: runner.os == 'Windows'

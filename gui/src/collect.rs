@@ -105,8 +105,10 @@ fn try_gather(cfg: &Config, verb: &str, mine: &[PathBuf]) -> std::io::Result<Opt
     }
     // claim our own file; if a previous leader's final sweep took it, our paths are already theirs
     if claim(&own, &name).is_none() {
+        // others may have queued behind us; gather them before letting go of the lock
+        let rest = sweep(&dir);
         let _ = fs::remove_file(&lock);
-        return Ok(None);
+        return Ok(if rest.is_empty() { None } else { Some(rest) });
     }
 
     let mut out: Vec<PathBuf> = mine.to_vec();
@@ -158,12 +160,27 @@ fn claim(path: &Path, name: &str) -> Option<Vec<PathBuf>> {
     Some(text.lines().filter(|l| !l.is_empty()).map(PathBuf::from).collect())
 }
 
+/// Spool files older than this belong to a leader that never came; they are dropped, not run.
+const ORPHAN_AGE: Duration = Duration::from_secs(30);
+
 fn sweep(dir: &Path) -> Vec<PathBuf> {
     let mut names: Vec<String> = fs::read_dir(dir)
         .map(|rd| rd.filter_map(|e| e.ok()).filter_map(|e| e.file_name().into_string().ok()).filter(|n| is_spool_file(n)).collect())
         .unwrap_or_default();
     names.sort();
-    names.iter().filter_map(|n| claim(&dir.join(n), n)).flatten().collect()
+    let mut out = Vec::new();
+    for n in &names {
+        let p = dir.join(n);
+        let age = fs::metadata(&p).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok());
+        if age.is_some_and(|a| a > ORPHAN_AGE) {
+            let _ = fs::remove_file(&p);
+            continue;
+        }
+        if let Some(v) = claim(&p, n) {
+            out.extend(v);
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -256,6 +273,22 @@ mod tests {
         // after it goes stale a new process takes over
         std::thread::sleep(c.stale_lock + Duration::from_millis(100));
         assert_eq!(gather_with(&c, "stale", &[PathBuf::from("y.zip")]), Some(vec![PathBuf::from("y.zip")]));
+    }
+
+    #[test]
+    fn orphaned_spool_files_are_deleted_not_resurrected() {
+        let t = tempfile::tempdir().unwrap();
+        let c = cfg(t.path());
+        let dir = verb_dir(&c, "orphan");
+        fs::create_dir_all(&dir).unwrap();
+        let old = dir.join(format!("{:040}-1-1", 1));
+        fs::write(&old, "ancient.zip\n").unwrap();
+        let f = fs::File::options().write(true).open(&old).unwrap();
+        f.set_modified(SystemTime::now() - Duration::from_secs(3600)).unwrap();
+        drop(f);
+        assert!(sweep(&dir).is_empty());
+        assert!(!old.exists());
+        assert_eq!(gather_with(&c, "orphan", &[PathBuf::from("n.zip")]), Some(vec![PathBuf::from("n.zip")]));
     }
 
     #[test]

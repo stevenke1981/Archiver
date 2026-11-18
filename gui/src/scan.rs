@@ -3,6 +3,7 @@
 use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(not(windows), allow(dead_code))]
 pub enum ScanOutcome {
     Clean,
     /// Defender reported a threat; text is the scanner output summary.
@@ -36,6 +37,7 @@ pub fn scan_file(path: &Path) -> Result<ScanOutcome, String> {
 }
 
 /// Map an MpCmdRun exit code: 0 = clean, 2 = threat found, anything else = scanner error.
+#[cfg(any(windows, test))]
 pub fn interpret(code: Option<i32>, output: &str) -> Result<ScanOutcome, String> {
     let summary = || {
         let s: Vec<&str> = output.lines().map(str::trim).filter(|l| !l.is_empty()).collect();

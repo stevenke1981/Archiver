@@ -22,7 +22,7 @@ $extractToKey = "$zipKey\shell\05extractdest"
 # Keep this script ASCII so Windows PowerShell 5.1 can parse it without a UTF-8 BOM.
 Check ((Get-Item $extractToKey).GetValue('MUIVerb') -match '^\u89e3\u58d3\u7e2e\u81f3\u2026$') "choose-destination context menu label"
 Check ((Get-Item "$extractToKey\command").GetValue('') -eq "`"$dir\archiver.exe`" --collect --extract-to `"%1`"") "choose-destination command targets installed binary"
-foreach ($v in '01open', '02extracthere', '03extractto', '04compress', '05extractdest', '06test', '07compresszip', '08compress7z', '09extracteach') {
+foreach ($v in '01open', '02extracthere', '03extractto', '04compress', '05extractdest', '06test', '07compresszip', '08compress7z') {
     Check (Test-Path "$zipKey\shell\$v\command") "verb $v registered"
     Check (-not [string]::IsNullOrEmpty((Get-Item "$zipKey\shell\$v").GetValue('Icon'))) "verb $v has an icon"
 }
