@@ -747,7 +747,8 @@ fn busy_jobs_block_new_ones_and_cancel_is_forwarded() {
     assert!(fx.log.contains(&"cancel".to_string()));
     update(&mut m, Msg::JobDone(Err("operation cancelled".into()), After::Nothing), &mut fx);
     assert!(!m.busy());
-    assert_eq!(m.status, "錯誤：operation cancelled");
+    assert_eq!(m.status, "已取消");
+    assert!(!fx.log.iter().any(|l| l.starts_with("error ")), "a user cancel is not an error box");
 }
 
 #[test]
@@ -861,4 +862,147 @@ fn screenshot_scene_renders_without_a_window() {
     let cols = crate::ui::columns(600.0, true);
     assert!(cols[0].w >= 180.0, "{cols:?}");
     assert!(crate::ui::columns(1100.0, true).len() == 6);
+}
+
+// ------------------------------------------------------------------ review fixes
+
+#[test]
+fn double_click_on_a_row_opens_it_through_the_pointer_path() {
+    use acme_platform::{Application, PlatformEvent, WindowId};
+    let t = tempfile::tempdir().unwrap();
+    std::fs::create_dir(t.path().join("sub")).unwrap();
+    std::fs::write(t.path().join("a.txt"), b"a").unwrap();
+    let mut app = crate::App::new(t.path().to_path_buf());
+    let (w, h) = (1100.0, 700.0);
+    app.frame_scene(w, h, 1.0);
+    let row = app.m.items.iter().position(|i| i.name == "sub").unwrap();
+    let g = crate::ui::geometry(w, h, app.m.preview_visible);
+    let (x, y) = (80.0, g.list.origin.y.get() + row as f32 * ROW_H + ROW_H / 2.0);
+    let button = |pressed| PlatformEvent::PointerButton { window: WindowId(0), pressed, x, y, button: 0, pointer: 0, shift: false, ctrl: false, alt: false };
+    app.event(PlatformEvent::PointerMoved { window: WindowId(0), x, y });
+    // the frame after the first press enables 複製/檢視 (selection): ids must not shift
+    for pressed in [true, false, true, false] {
+        app.event(button(pressed));
+        app.frame_scene(w, h, 1.0);
+    }
+    assert_eq!(app.m.location(), t.path().join("sub"));
+}
+
+#[test]
+fn password_is_forgotten_when_leaving_or_switching_archives() {
+    let t = tempfile::tempdir().unwrap();
+    let a = sample_zip(t.path());
+    let b = t.path().join("plain.zip");
+    std::fs::copy(&a, &b).unwrap();
+    let (mut m, mut fx) = (Model::new(t.path().to_path_buf()), Fx::default());
+    upd_open(&mut m, &mut fx, &a);
+    update(&mut m, Msg::Cmd(Cmd::Password), &mut fx);
+    update(&mut m, Msg::Text("secret".into()), &mut fx);
+    update(&mut m, key(PlatformKey::Enter), &mut fx);
+    fx.run_jobs(&mut m);
+    assert_eq!((m.password.as_str(), m.password_for.as_deref()), ("secret", Some(a.as_path())));
+    // another archive: the password does not follow
+    upd_open(&mut m, &mut fx, &b);
+    assert!(m.password.is_empty() && m.password_for.is_none());
+    // leaving archive mode forgets it too
+    upd_open(&mut m, &mut fx, &a);
+    m.password = "secret".into();
+    m.password_for = Some(a.clone());
+    update(&mut m, Msg::Cmd(Cmd::Up), &mut fx);
+    update(&mut m, Msg::Cmd(Cmd::Up), &mut fx);
+    update(&mut m, Msg::Cmd(Cmd::Up), &mut fx);
+    assert!(!m.in_archive());
+    assert!(m.password.is_empty());
+}
+
+#[test]
+fn adding_to_a_plain_archive_never_encrypts_it() {
+    let t = tempfile::tempdir().unwrap();
+    let archive = sample_zip(t.path());
+    let extra = t.path().join("extra.txt");
+    std::fs::write(&extra, b"extra").unwrap();
+    let (mut m, mut fx) = (Model::new(t.path().to_path_buf()), Fx::default());
+    upd_open(&mut m, &mut fx, &archive);
+    // a stale password (e.g. from the dialog) must not be used for an unencrypted archive
+    m.password = "stale".into();
+    add_to_archive(&mut m, &mut fx, vec![extra]);
+    fx.run_jobs(&mut m);
+    let entries = archiver_core::list(&archive, None).unwrap();
+    assert!(entries.iter().any(|e| e.name == "extra.txt"), "{:?}", fx.log);
+    assert!(entries.iter().all(|e| !e.encrypted));
+}
+
+#[test]
+fn rewriting_an_encrypted_archive_asks_for_the_password_first() {
+    let t = tempfile::tempdir().unwrap();
+    let (mut m, mut fx) = (Model::new(t.path().to_path_buf()), Fx::default());
+    let enc = |name: &str| Entry { name: name.into(), size: 1, compressed: None, modified: None, is_dir: false, crc32: None, encrypted: true };
+    show_listing(&mut m, &mut fx, t.path().join("e.zip"), vec![enc("a.txt")]);
+    add_to_archive(&mut m, &mut fx, vec![t.path().join("x")]);
+    assert!(matches!(m.dialog, Some(Dialog::Password(_))));
+    assert!(fx.jobs.is_empty());
+    update(&mut m, Msg::Dialog(DlgMsg::Cancel), &mut fx);
+    fx.confirm = true;
+    update(&mut m, press(1, false, false), &mut fx);
+    update(&mut m, key(PlatformKey::Delete), &mut fx);
+    assert!(matches!(m.dialog, Some(Dialog::Password(_))));
+    assert!(fx.jobs.is_empty());
+}
+
+#[test]
+fn password_prompt_reopens_the_archive_that_asked() {
+    let t = tempfile::tempdir().unwrap();
+    let shown = sample_zip(t.path());
+    let (mut m, mut fx) = (Model::new(t.path().to_path_buf()), Fx::default());
+    upd_open(&mut m, &mut fx, &shown);
+    let other = t.path().join("other.7z");
+    update(&mut m, Msg::Listed(other.clone(), Err("wrong password".into())), &mut fx);
+    update(&mut m, Msg::Text("pw".into()), &mut fx);
+    update(&mut m, Msg::Dialog(DlgMsg::Ok), &mut fx);
+    assert_eq!(m.password_for.as_deref(), Some(other.as_path()));
+    assert!(m.fallback_open.is_none());
+    // Escape clears the fallback as well
+    update(&mut m, Msg::Listed(other, Err("wrong password".into())), &mut fx);
+    update(&mut m, key(PlatformKey::Escape), &mut fx);
+    assert!(m.dialog.is_none() && m.fallback_open.is_none());
+}
+
+#[test]
+fn fallback_open_only_on_password_errors() {
+    let (mut m, mut fx) = (model_with(rows()), Fx::default());
+    m.fallback_open = Some(PathBuf::from("/x/a.7z"));
+    m.job = Some(JobView::default());
+    update(&mut m, Msg::JobDone(Err("disk full".into()), After::Nothing), &mut fx);
+    assert!(fx.log.iter().any(|l| l == "error disk full"));
+    assert!(fx.jobs.is_empty() && m.fallback_open.is_none());
+    m.fallback_open = Some(PathBuf::from("/x/a.7z"));
+    update(&mut m, Msg::JobDone(Err("password required".into()), After::Nothing), &mut fx);
+    assert_eq!(fx.jobs.len(), 1, "the archive is opened so a password can be entered");
+}
+
+#[test]
+fn testing_several_archives_continues_past_failures() {
+    let t = tempfile::tempdir().unwrap();
+    let good = sample_zip(t.path());
+    let bad = t.path().join("bad.zip");
+    std::fs::write(&bad, b"not a zip").unwrap();
+    match test_msg(&[bad, good], None, &Progress::none()) {
+        Msg::JobDone(Err(text), After::Nothing) => {
+            assert!(text.starts_with("已測試 2 個（正確 1，錯誤 1）"), "{text}");
+            assert!(text.contains("✗ bad.zip") && text.contains("selection.zip："), "{text}");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn cancelled_batches_report_cancel_not_errors() {
+    let results = vec![r("/a/x.zip", Ok(())), r("/a/y.zip", Err(Error::Cancelled))];
+    let msg = batch_msg(&results);
+    let (mut m, mut fx) = (model_with(rows()), Fx::default());
+    m.close_when_done = true;
+    update(&mut m, msg, &mut fx);
+    assert_eq!(m.status, "已取消");
+    assert!(fx.log.iter().all(|l| !l.starts_with("error ")));
+    assert!(fx.closed, "a cancelled shell job closes its window");
 }

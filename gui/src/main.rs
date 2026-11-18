@@ -27,6 +27,8 @@ use ui::{Hit, Ui, geometry};
 
 const DROP_SETTLE: Duration = Duration::from_millis(120);
 const POLL: Duration = Duration::from_millis(50);
+/// How long closing the window waits for a cancelled job to clean up.
+const JOB_STOP_WAIT: Duration = Duration::from_secs(3);
 
 /// The window: model + effects + painter state.
 struct App {
@@ -99,6 +101,8 @@ impl App {
         }
         if self.fx.closing && !self.closed {
             self.closed = true;
+            // stop a running job first so it can remove partial output
+            self.fx.cancel_and_wait(JOB_STOP_WAIT);
             self.requests.push(WindowRequest::Close);
         }
         self.m.pv.scroll = self.m.pv.scroll.min(self.ui.pv_max_scroll);
@@ -278,6 +282,16 @@ impl Application for App {
             }
             _ => false,
         }
+    }
+
+    fn close_requested(&mut self, _window: WindowId) -> bool {
+        if self.m.busy() {
+            if !self.fx.confirm("結束 Archiver", "背景工作仍在進行中，確定要取消工作並結束嗎？") {
+                return false;
+            }
+            self.fx.cancel_and_wait(JOB_STOP_WAIT);
+        }
+        true
     }
 
     fn on_waker(&mut self, waker: acme_platform::Waker) {

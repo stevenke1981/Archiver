@@ -200,7 +200,10 @@ pub struct Model {
     pub sort_col: i32,
     pub sort_asc: bool,
     pub filter: String,
+    /// Session password (password dialog).
     pub password: String,
+    /// Archive the password belongs to; None = entered in folder mode, not bound yet.
+    pub password_for: Option<PathBuf>,
     pub job: Option<JobView>,
     pub create_inputs: Vec<PathBuf>,
     /// Remembered create-dialog format index.
@@ -233,6 +236,7 @@ impl Model {
             sort_asc: true,
             filter: String::new(),
             password: String::new(),
+            password_for: None,
             job: None,
             create_inputs: vec![],
             last_format: 0,

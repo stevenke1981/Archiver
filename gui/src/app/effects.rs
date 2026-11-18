@@ -3,13 +3,14 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::sync::{Arc, Mutex};
 
 use acme_platform::Waker;
 use archiver_core::Progress;
 
 use super::model::PvSrc;
+use super::model::After;
 use super::msg::Msg;
 use super::worker;
 use crate::clipboard::Clip;
@@ -80,13 +81,29 @@ impl RealEffects {
     /// Finished background results (job and previews), oldest first.
     pub fn drain(&mut self) -> Vec<Msg> {
         let mut out: Vec<Msg> = self.pv_rx.try_iter().collect();
-        if let Some(job) = &self.job
-            && let Ok(m) = job.rx.try_recv()
-        {
-            self.job = None;
-            out.push(m);
+        if let Some(job) = &self.job {
+            match job.rx.try_recv() {
+                Ok(m) => {
+                    self.job = None;
+                    out.push(m);
+                }
+                Err(TryRecvError::Disconnected) => {
+                    // the worker panicked before sending its result
+                    self.job = None;
+                    out.push(Msg::JobDone(Err("背景工作異常終止".into()), After::Nothing));
+                }
+                Err(TryRecvError::Empty) => {}
+            }
         }
         out
+    }
+
+    /// Cancel the running job and wait up to `limit` for it to stop (so it can clean up
+    /// partial output before the process exits). True when it finished in time.
+    pub fn cancel_and_wait(&mut self, limit: std::time::Duration) -> bool {
+        let Some(job) = self.job.take() else { return true };
+        job.cancel.store(true, Ordering::Relaxed);
+        job.rx.recv_timeout(limit).is_ok()
     }
 
     /// (done, total, current item) of the running job.

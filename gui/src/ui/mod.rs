@@ -15,6 +15,8 @@ use crate::view;
 use icons::{Icon, Icons};
 use text::{Font, Text};
 
+/// Hit id of list row 0 (row ids are stable across frames).
+pub const ROW_BASE: u64 = 1 << 32;
 pub const MENU_H: f32 = 28.0;
 pub const TOOL_H: f32 = 74.0;
 pub const PATH_H: f32 = 38.0;
@@ -144,7 +146,11 @@ pub struct Ui {
     icons: Icons,
     pub theme: Theme,
     pub layer: HitTestLayer,
-    hits: Vec<Hit>,
+    /// Hit regions of the last frame by id. Ids must not shift between a press and its
+    /// release (the frame in between may enable buttons), so rows use [`ROW_BASE`] + index
+    /// and disabled controls still take their id (as [`Hit::Block`]).
+    hits: Vec<(NodeId, Hit)>,
+    next_id: u64,
     /// Pointer position (logical) for hover effects.
     pub pointer: Option<(f32, f32)>,
     /// Region currently held down.
@@ -168,6 +174,7 @@ impl Ui {
             theme,
             layer: HitTestLayer::new(),
             hits: vec![],
+            next_id: 1,
             pointer: None,
             pressed: None,
             scale: 1.0,
@@ -182,7 +189,7 @@ impl Ui {
     }
 
     pub fn hit(&self, id: NodeId) -> Option<&Hit> {
-        self.hits.get((id.get() as usize).checked_sub(1)?)
+        self.hits.iter().find(|(i, _)| *i == id).map(|(_, h)| h)
     }
 
     /// Index of the menu-bar title under (x, y).
@@ -191,9 +198,14 @@ impl Ui {
     }
 
     fn push_hit(&mut self, r: R, hit: Hit, cursor: CursorHint) -> NodeId {
-        let id = NodeId::new(self.hits.len() as u64 + 1);
+        let id = NodeId::new(self.next_id);
+        self.next_id += 1;
+        self.push_hit_id(id, r, hit, cursor)
+    }
+
+    fn push_hit_id(&mut self, id: NodeId, r: R, hit: Hit, cursor: CursorHint) -> NodeId {
         self.layer.push_region(HitRegionSpec::rect(id, r).cursor(cursor).z_layer(self.z));
-        self.hits.push(hit);
+        self.hits.push((id, hit));
         id
     }
 
@@ -222,6 +234,7 @@ impl Ui {
         self.text.begin_frame(scale);
         self.layer.clear();
         self.hits.clear();
+        self.next_id = 1;
         self.ime_rect = None;
         self.top_level = if m.popup.is_some() { 2 } else if m.dialog.is_some() { 1 } else { 0 };
         let g = geometry(w, h, m.preview_visible);
@@ -313,7 +326,7 @@ impl Ui {
             }
             let r = rect(x, y + 5.0, bw, bh);
             let hovered = enabled && self.hover(&r);
-            let id = if enabled { Some(self.click(r, Msg::Cmd(cmd))) } else { None };
+            let id = if enabled { Some(self.click(r, Msg::Cmd(cmd))) } else { self.push_hit(r, Hit::Block, CursorHint::Default); None };
             let pressed = id.is_some() && id == self.pressed;
             if pressed {
                 p.rounded_rect_bordered(r, 6.0, col(c.ghost_pressed), 1.0, col(c.border));
@@ -397,7 +410,7 @@ impl Ui {
             if m.anchor == Some(i) && m.dialog.is_none() {
                 p.stroke_rect(rect(lx + 1.0, y, row_w - 2.0, ROW_H), 1.0, col(c.ring.with_alpha(0.6)));
             }
-            self.push_hit(r, Hit::Row(i), CursorHint::Default);
+            self.push_hit_id(NodeId::new(ROW_BASE + i as u64), r, Hit::Row(i), CursorHint::Default);
             let fg = if selected { sel_fg } else { c.foreground };
             let muted = if selected { sel_fg } else { c.muted_foreground };
             for cl in &cols {

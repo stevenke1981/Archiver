@@ -11,7 +11,7 @@ impl Ui {
     pub(super) fn button(&mut self, p: &mut Painter, r: R, label: &str, enabled: bool, primary: bool, msg: Msg) {
         let c = self.theme.colors;
         let hovered = enabled && self.hover(&r);
-        let id = enabled.then(|| self.click(r, msg));
+        let id = if enabled { Some(self.click(r, msg)) } else { self.push_hit(r, Hit::Block, CursorHint::Default); None };
         let pressed = id.is_some() && id == self.pressed;
         let (bg, border, fg) = match (enabled, primary) {
             (false, _) => (c.disabled_bg, c.border, c.disabled_text),
@@ -34,6 +34,8 @@ impl Ui {
         let hovered = enabled && self.hover(&r);
         if enabled {
             self.click(r, msg);
+        } else {
+            self.push_hit(r, Hit::Block, CursorHint::Default);
         }
         let b = rect(x, y + (h - 16.0) / 2.0, 16.0, 16.0);
         if checked {
@@ -68,6 +70,8 @@ impl Ui {
         self.field_frame(p, r, focused, enabled);
         if enabled {
             self.push_hit(r, Hit::Field(field, r), CursorHint::Text);
+        } else {
+            self.push_hit(r, Hit::Block, CursorHint::Default);
         }
         let (x, y, w, h) = rx(&r);
         let (ix, iw) = (x + 8.0, w - 16.0);

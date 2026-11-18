@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use acme_core::{ImageKey, Rgba8Image};
 use acme_platform::PlatformKey;
 use acme_textinput::{handle_key, handle_keyboard_shortcut, handle_text};
-use archiver_core::{BatchDest, BatchResult, CreateOptions, Format, Progress};
+use archiver_core::{BatchDest, BatchResult, CreateOptions, Error, Format, Progress};
 
 use super::effects::Effects;
 use super::menus::MENU_KEYS;
@@ -406,6 +406,7 @@ fn close_dialog(m: &mut Model) {
     m.dialog = None;
     m.focus = None;
     m.popup = None;
+    m.fallback_open = None;
 }
 
 // ------------------------------------------------------------------ commands
@@ -497,7 +498,11 @@ pub fn command(m: &mut Model, fx: &mut dyn Effects, c: Cmd) {
             "關於 Archiver",
             &format!("Archiver {}\n跨平台壓縮／解壓縮工具（Rust + AcmeUI-Native）\nhttps://github.com/stevenke1981/Archiver\nMIT License", env!("CARGO_PKG_VERSION")),
         ),
-        Cmd::Exit => fx.close(),
+        Cmd::Exit => {
+            if !m.busy() || fx.confirm("結束 Archiver", "背景工作仍在進行中，確定要取消工作並結束嗎？") {
+                fx.close();
+            }
+        }
         Cmd::TogglePreview => {
             m.preview_visible = !m.preview_visible;
             selection_changed(m, fx);
@@ -538,6 +543,9 @@ pub fn command(m: &mut Model, fx: &mut dyn Effects, c: Cmd) {
 /// Open a folder (file-system mode) or an archive.
 pub fn open_location(m: &mut Model, fx: &mut dyn Effects, p: PathBuf) {
     if p.is_dir() {
+        if m.in_archive() {
+            forget_password(m);
+        }
         m.mode = Mode::Fs(p);
         m.filter.clear();
         m.status.clear();
@@ -557,7 +565,17 @@ pub fn open_archive(m: &mut Model, fx: &mut dyn Effects, path: PathBuf) {
     reload_archive(m, fx, path);
 }
 
+/// Drop the session password (leaving the archive it was entered for).
+fn forget_password(m: &mut Model) {
+    m.password.clear();
+    m.password_for = None;
+}
+
 fn reload_archive(m: &mut Model, fx: &mut dyn Effects, path: PathBuf) {
+    // a password belongs to the archive it was entered for
+    if m.password_for.as_ref().is_some_and(|p| *p != path) {
+        forget_password(m);
+    }
     // listing can take long (.tar.gz is read in full): in the background
     let pw = m.opt_pw();
     spawn(m, fx, "讀取中…", move |_| {
@@ -577,6 +595,9 @@ pub fn show_listing(m: &mut Model, fx: &mut dyn Effects, path: PathBuf, entries:
     if prefix.is_none() {
         m.filter.clear();
         m.status.clear();
+    }
+    if !m.password.is_empty() {
+        m.password_for = Some(path.clone());
     }
     m.mode = Mode::Archive { path, fmt, entries, prefix: prefix.unwrap_or_default() };
     m.pv.cache = None;
@@ -621,6 +642,7 @@ pub fn go_up(m: &mut Model, fx: &mut dyn Effects) {
             }
         };
         if let Some(d) = next {
+            forget_password(m);
             m.mode = Mode::Fs(d);
             m.pv.cache = None;
         }
@@ -784,6 +806,28 @@ pub fn compress_to(m: &mut Model, fx: &mut dyn Effects, format: Format, files: V
     });
 }
 
+/// The job stopped because the user cancelled it (core's Error::Cancelled).
+pub fn is_cancel_err(e: &str) -> bool {
+    e == Error::Cancelled.to_string()
+}
+
+/// Password for rewriting the open archive (add / delete): only when it is encrypted,
+/// so a plain archive is never re-created encrypted. None = asked for one first.
+fn rewrite_password(m: &mut Model) -> Option<Option<String>> {
+    let Mode::Archive { entries, .. } = &m.mode else { return Some(None) };
+    if !entries.iter().any(|e| e.encrypted) {
+        return Some(None);
+    }
+    match m.opt_pw() {
+        Some(pw) => Some(Some(pw)),
+        None => {
+            set_status(m, "此壓縮檔已加密，請先輸入密碼");
+            open_dialog(m, Dialog::Password(text_input("", true)));
+            None
+        }
+    }
+}
+
 pub fn is_password_err(e: &str) -> bool {
     e.to_lowercase().contains("password")
 }
@@ -813,19 +857,36 @@ pub fn single_password_failure(results: &[BatchResult]) -> Option<PathBuf> {
 }
 
 pub fn batch_msg(results: &[BatchResult]) -> Msg {
+    if results.iter().any(|r| matches!(r.result, Err(Error::Cancelled))) {
+        return Msg::JobDone(Err(Error::Cancelled.to_string()), After::Nothing);
+    }
     let (text, failed) = batch_summary(results);
     Msg::JobDone(Ok(text), After::Batch { failed, retry: single_password_failure(results) })
 }
 
-fn test_msg(targets: &[PathBuf], pw: Option<&str>, p: &Progress) -> Msg {
+pub fn test_msg(targets: &[PathBuf], pw: Option<&str>, p: &Progress) -> Msg {
     let mut lines = Vec::new();
+    let mut failed = 0;
     for a in targets {
+        let name = a.file_name().unwrap_or_default().to_string_lossy();
         match archiver_core::test(a, pw, p) {
-            Ok(n) => lines.push(format!("{}：{n} 個檔案測試正確，沒有發現錯誤。", a.file_name().unwrap_or_default().to_string_lossy())),
-            Err(e) => return Msg::JobDone(Err(format!("{}：{e}", a.display())), After::Nothing),
+            Ok(n) => lines.push(format!("{name}：{n} 個檔案測試正確，沒有發現錯誤。")),
+            Err(Error::Cancelled) => return Msg::JobDone(Err(Error::Cancelled.to_string()), After::Nothing),
+            // keep going: one broken archive should not hide the others' results
+            Err(e) => {
+                failed += 1;
+                lines.push(format!("✗ {name}：{e}"));
+            }
         }
     }
-    Msg::JobDone(Ok(lines.join("\n")), After::Message)
+    if failed == 0 {
+        return Msg::JobDone(Ok(lines.join("\n")), After::Message);
+    }
+    let head = format!("已測試 {} 個（正確 {}，錯誤 {failed}）", targets.len(), targets.len() - failed);
+    if targets.len() == 1 {
+        return Msg::JobDone(Err(lines.join("\n").trim_start_matches("✗ ").to_string()), After::Nothing);
+    }
+    Msg::JobDone(Err(format!("{head}\n{}", lines.join("\n"))), After::Nothing)
 }
 
 fn do_test(m: &mut Model, fx: &mut dyn Effects) {
@@ -853,7 +914,7 @@ fn do_delete(m: &mut Model, fx: &mut dyn Effects) {
     if is_busy(m) || !fx.confirm("刪除檔案", &format!("確定要從壓縮檔中刪除 {} 個項目嗎？", names.len())) {
         return;
     }
-    let pw = m.opt_pw();
+    let Some(pw) = rewrite_password(m) else { return };
     spawn(m, fx, "刪除中…", move |p| {
         let r = archiver_core::delete(&arc, &names, pw.as_deref(), p).map(|_| format!("已刪除 {} 個項目", names.len())).map_err(|e| e.to_string());
         Msg::JobDone(r, After::ReloadArchive)
@@ -867,7 +928,8 @@ pub fn add_to_archive(m: &mut Model, fx: &mut dyn Effects, files: Vec<PathBuf>) 
         return;
     }
     let (arc, fmt, prefix) = (path.clone(), *fmt, prefix.trim_end_matches('/').to_string());
-    let opts = CreateOptions { format: fmt, level: fmt.level_range().map(|r| r.2), password: m.opt_pw().filter(|_| fmt.supports_password()) };
+    let Some(pw) = rewrite_password(m) else { return };
+    let opts = CreateOptions { format: fmt, level: fmt.level_range().map(|r| r.2), password: pw.filter(|_| fmt.supports_password()) };
     spawn(m, fx, "加入中…", move |p| {
         let n = files.len();
         let r = archiver_core::add(&arc, &files, &prefix, &opts, p).map(|_| format!("已加入 {n} 個項目")).map_err(|e| e.to_string());
@@ -988,12 +1050,15 @@ fn dialog_msg(m: &mut Model, fx: &mut dyn Effects, d: DlgMsg) {
         DlgMsg::Ok => match &m.dialog {
             Some(Dialog::Create(_)) => start_create(m, fx),
             Some(Dialog::Password(t)) => {
-                m.password = t.text.clone();
-                close_dialog(m);
-                let target = match &m.mode {
+                let password = t.text.clone();
+                // the archive that asked for the password wins over the one that is shown
+                let target = m.fallback_open.take().or_else(|| match &m.mode {
                     Mode::Archive { path, .. } => Some(path.clone()),
-                    _ => m.fallback_open.take(),
-                };
+                    _ => None,
+                });
+                close_dialog(m);
+                m.password = password;
+                m.password_for = target.clone();
                 if let Some(p) = target {
                     open_archive(m, fx, p);
                 }
@@ -1006,10 +1071,7 @@ fn dialog_msg(m: &mut Model, fx: &mut dyn Effects, d: DlgMsg) {
             Some(Dialog::Comment { .. }) => save_comment(m, fx),
             _ => close_dialog(m),
         },
-        DlgMsg::Cancel => {
-            close_dialog(m);
-            m.fallback_open = None;
-        }
+        DlgMsg::Cancel => close_dialog(m),
         DlgMsg::Focus(f, offset) => {
             if f == Field::CreatePassword && matches!(&m.dialog, Some(Dialog::Create(d)) if !d.fmt().supports_password()) {
                 return;
@@ -1324,10 +1386,17 @@ fn job_done(m: &mut Model, fx: &mut dyn Effects, r: Result<String, String>, afte
             }
         }
         Err(e) => {
-            m.close_when_done = false;
+            let from_cli = std::mem::take(&mut m.close_when_done);
             let fallback = m.fallback_open.take();
+            if is_cancel_err(&e) {
+                set_status(m, "已取消");
+                if from_cli {
+                    fx.close();
+                }
+                return;
+            }
             set_status(m, format!("錯誤：{e}"));
-            match fallback {
+            match fallback.filter(|_| is_password_err(&e)) {
                 // e.g. encrypted archive from the context menu: open it so a password can be entered
                 Some(p) => open_archive(m, fx, p),
                 None => fx.error(&e),
