@@ -735,6 +735,25 @@ fn extract_selected_uses_the_picked_folder() {
 }
 
 #[test]
+fn extract_with_nothing_selected_picks_archive_then_folder_and_extracts() {
+    let t = tempfile::tempdir().unwrap();
+    let archive = sample_zip(t.path());
+    let (mut m, mut fx) = (Model::new(t.path().to_path_buf()), Fx::default());
+    update(&mut m, Msg::Cmd(Cmd::Extract), &mut fx);
+    assert!(fx.log.iter().any(|l| l == "pick_file 選擇要解壓縮的壓縮檔"));
+    assert!(!m.busy(), "file dialog cancelled");
+    fx.files = Some(vec![archive.clone()]);
+    update(&mut m, Msg::Cmd(Cmd::Extract), &mut fx);
+    assert!(fx.log.iter().any(|l| l == "pick_folder 解壓縮至…"));
+    assert!(!m.busy(), "folder dialog cancelled");
+    fx.folder = Some(t.path().join("out"));
+    update(&mut m, Msg::Cmd(Cmd::Extract), &mut fx);
+    fx.run_jobs(&mut m);
+    assert!(t.path().join("out/data/folder/nested/中文.txt").is_file());
+    assert!(m.status.starts_with("已解壓縮到"), "{}", m.status);
+}
+
+#[test]
 fn busy_jobs_block_new_ones_and_cancel_is_forwarded() {
     let (mut m, mut fx) = (model_with(rows()), Fx::default());
     m.job = Some(JobView { title: "x".into(), ..JobView::default() });
