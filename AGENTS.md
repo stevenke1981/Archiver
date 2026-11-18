@@ -137,8 +137,8 @@ rarc t smoke/t.zip --json | grep -q '"tested":1'
 
 ## Shell integration
 
-- Registry verb keys are `01open` … `09extracteach` (see `COMMANDS` in `gui/src/shell.rs`). CI checks `02extracthere`, `05extractdest`, `06test`, `07compresszip`, `08compress7z`, `09extracteach` and `MultiSelectModel`.
-- Keep keys 01 to 09 stable. Add new verbs at the next number and append them to `COMMANDS`. Do not renumber or reuse a key, because upgrades and CI depend on them.
+- Registry verb keys are `01open` … `08compress7z` (see `COMMANDS` in `gui/src/shell.rs`). CI checks `02extracthere`, `05extractdest`, `06test`, `07compresszip`, `08compress7z`, `MultiSelectModel` (and `CommandFlags` as `REG_DWORD`).
+- Keep keys 01 to 08 stable (09 was used briefly during v0.7.0 development and removed as a duplicate of 03; don't reuse it). Add new verbs at the next number and append them to `COMMANDS`. Do not renumber or reuse a key, because upgrades and CI depend on them.
 - `--collect` must stay the first argument (`args::parse_invocation`). The verb names passed to `collect::gather` are part of the spool-directory layout.
 - `register()` deletes the roots before rewriting them, so removed verbs disappear. `cleanup_legacy()` removes v0.2.0 "Rust Archiver" entries. Keep it until v0.2.0 installs are no longer a concern.
 - Windows writes only under `HKCU\Software\Classes`. Never write to HKLM from code paths that run without admin.
