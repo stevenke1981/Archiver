@@ -17,10 +17,20 @@ Check (Test-Path 'HKCU:\Software\Classes\Archiver.archive\shell\open\command') "
 Check ((Get-ItemProperty 'HKCU:\Software\Classes\.7z\OpenWithProgids').PSObject.Properties.Name -contains 'Archiver.archive') ".7z OpenWithProgids"
 Check (Test-Path 'HKCU:\Software\Classes\Directory\shell\Archiver') "Explorer context menu registered"
 Check (Test-Path 'HKCU:\Software\Classes\SystemFileAssociations\.zip\shell\Archiver') "zip context menu registered"
-$extractToKey = 'HKCU:\Software\Classes\SystemFileAssociations\.zip\shell\Archiver\shell\05extractdest'
+$zipKey = 'HKCU:\Software\Classes\SystemFileAssociations\.zip\shell\Archiver'
+$extractToKey = "$zipKey\shell\05extractdest"
 # Keep this script ASCII so Windows PowerShell 5.1 can parse it without a UTF-8 BOM.
 Check ((Get-Item $extractToKey).GetValue('MUIVerb') -match '^\u89e3\u58d3\u7e2e\u81f3\u2026$') "choose-destination context menu label"
-Check ((Get-Item "$extractToKey\command").GetValue('') -eq "`"$dir\archiver.exe`" --extract-to `"%1`"") "choose-destination command targets installed binary"
+Check ((Get-Item "$extractToKey\command").GetValue('') -eq "`"$dir\archiver.exe`" --collect --extract-to `"%1`"") "choose-destination command targets installed binary"
+foreach ($v in '01open', '02extracthere', '03extractto', '04compress', '05extractdest', '06test', '07compresszip', '08compress7z', '09extracteach') {
+    Check (Test-Path "$zipKey\shell\$v\command") "verb $v registered"
+    Check (-not [string]::IsNullOrEmpty((Get-Item "$zipKey\shell\$v").GetValue('Icon'))) "verb $v has an icon"
+}
+Check ((Get-Item "$zipKey\shell\06test").GetValue('MultiSelectModel') -eq 'Player') "06test supports multi-select (MultiSelectModel=Player)"
+Check ((Get-Item "$zipKey\shell\06test").GetValue('MUIVerb') -match '^\u6e2c\u8a66\u58d3\u7e2e\u6a94$') "test-archive context menu label"
+Check ((Get-Item "$zipKey\shell\06test\command").GetValue('') -eq "`"$dir\archiver.exe`" --collect --test `"%1`"") "test command targets installed binary"
+Check ((Get-Item "$zipKey\shell\07compresszip").GetValue('MUIVerb') -match '^\u58d3\u7e2e\u6210\u540c\u540d .zip$') "compress-to-zip label"
+Check ((Get-Item 'HKCU:\Software\Classes\Directory\shell\Archiver\shell\08compress7z\command').GetValue('') -eq "`"$dir\archiver.exe`" --collect --compress-to 7z `"%1`"") "folder compress-to-7z command"
 $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 Check ($userPath -like "*$dir*") "install dir on user PATH"
 Check (Test-Path (Join-Path ([Environment]::GetFolderPath('Programs')) 'Archiver.lnk')) "Start menu shortcut"
@@ -34,6 +44,9 @@ New-Item -ItemType Directory -Force "$tmp\in" | Out-Null
 Set-Content "$tmp\in\hello.txt" 'hello from installer smoke test'
 & (Join-Path $dir 'rarc.exe') c "$tmp\t.7z" "$tmp\in"; Check ($LASTEXITCODE -eq 0) "rarc create 7z"
 & (Join-Path $dir 'rarc.exe') l "$tmp\t.7z"; Check ($LASTEXITCODE -eq 0) "rarc list 7z"
+$json = & (Join-Path $dir 'rarc.exe') l "$tmp\t.7z" --json
+Check (($json | ConvertFrom-Json).ok -eq $true) "rarc list --json parses"
+& (Join-Path $dir 'rarc.exe') t "$tmp\t.7z"; Check ($LASTEXITCODE -eq 0) "rarc test 7z"
 
 $p = Start-Process (Join-Path $dir 'unins000.exe') -Wait -PassThru -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART'
 Check ($p.ExitCode -eq 0) "uninstaller exit code 0"

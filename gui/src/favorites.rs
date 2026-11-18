@@ -149,7 +149,7 @@ mod tests {
             move |k: &str| pairs.iter().find(|p| p.0 == k).map(|p| OsString::from(p.1))
         };
         assert_eq!(config_dir_from(env(&[("ARCHIVER_CONFIG_DIR", "/x/y"), ("APPDATA", "/z"), ("HOME", "/h")])), Some(PathBuf::from("/x/y")));
-        assert_eq!(config_dir_from(env(&[("ARCHIVER_CONFIG_DIR", ""), ("APPDATA", "/z"), ("HOME", "/h")])).is_some(), true);
+        assert!(config_dir_from(env(&[("ARCHIVER_CONFIG_DIR", ""), ("APPDATA", "/z"), ("HOME", "/h")])).is_some());
         assert_eq!(config_dir_from(env(&[])), None);
         let d = config_dir_from(env(&[("APPDATA", "/ad"), ("HOME", "/h"), ("XDG_CONFIG_HOME", "/xdg")])).unwrap();
         if cfg!(windows) {
