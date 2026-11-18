@@ -2,6 +2,8 @@
 
 use std::path::PathBuf;
 
+use archiver_core::Format;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     /// No arguments: plain GUI.
@@ -11,6 +13,12 @@ pub enum Action {
     ExtractToFolder(Vec<PathBuf>),
     ExtractTo(Vec<PathBuf>),
     Compress(Vec<PathBuf>),
+    /// Test archive integrity (context-menu "Test archive").
+    Test(Vec<PathBuf>),
+    /// One-click "compress to <name>.<ext>" next to the inputs, no dialog.
+    CompressTo { format: Format, files: Vec<PathBuf> },
+    /// Render the main window headlessly to a PNG (agents / CI), then exit.
+    Screenshot { out: PathBuf, size: (u32, u32), open: Option<PathBuf> },
     RegisterShell,
     UnregisterShell,
     Help,
@@ -26,6 +34,22 @@ pub const USAGE: &str = "Usage: archiver [OPTION] [FILES...]
   --register-shell                install right-click menu integration (current user)
   --unregister-shell              remove right-click menu integration
   -h, --help                      show this help";
+
+/// Parsed command line plus the `--collect` flag (aggregate Explorer multi-select,
+/// see `collect::gather`). CONTRACT STUB: workstream B implements the new options.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Invocation {
+    pub action: Action,
+    pub collect: bool,
+}
+
+pub fn parse_invocation<I, S>(args: I) -> Result<Invocation, String>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<std::ffi::OsString>,
+{
+    parse(args).map(|action| Invocation { action, collect: false })
+}
 
 pub fn parse<I, S>(args: I) -> Result<Action, String>
 where

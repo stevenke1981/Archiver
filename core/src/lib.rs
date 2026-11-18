@@ -505,6 +505,8 @@ impl<R: Read> Read for XzMulti<R> {
 
 mod archive_ops;
 mod create;
+mod edit;
+pub use edit::{add, read_comment, set_comment};
 use archive_ops::*;
 use create::*;
 pub use archive_ops::{delete, extract, list, test};

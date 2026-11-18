@@ -3,6 +3,12 @@
 
 mod args;
 mod clipboard;
+#[allow(dead_code)]
+mod collect;
+#[allow(dead_code)]
+mod favorites;
+#[allow(dead_code)]
+mod scan;
 mod preview;
 mod shell;
 mod view;
