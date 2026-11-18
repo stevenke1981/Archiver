@@ -186,6 +186,7 @@ pub(super) fn open_zip(archive: &Path) -> Result<zip::ZipArchive<BufReader<File>
 /// ZIP extraction. Entries are chosen from the central directory alone, so unselected entries are
 /// never opened or decrypted. Large jobs are split into size-balanced groups (longest first),
 /// each extracted by its own thread with its own file handle.
+#[allow(clippy::absurd_extreme_comparisons)] // ZIP_PARALLEL_MIN is 0 under cfg(test)
 pub(super) fn extract_zip(archive: &Path, dest: &Path, password: Option<&str>, selected: Option<&[String]>, threads: usize, p: &Progress) -> Result<()> {
     let mut z = open_zip(archive)?;
     let (mut files, mut total) = (Vec::new(), 0);

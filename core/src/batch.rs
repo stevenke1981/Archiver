@@ -161,7 +161,7 @@ mod tests {
             let f = d.join("data.txt");
             fs::write(&f, body).unwrap();
             let out = d.join(format!("data.{}", fmt.extension()));
-            super::super::create(&out, &[f.clone()], &CreateOptions { format: fmt, level: None, password: None }, &Progress::none()).unwrap();
+            super::super::create(&out, std::slice::from_ref(&f), &CreateOptions { format: fmt, level: None, password: None }, &Progress::none()).unwrap();
             fs::remove_file(&f).unwrap();
             arcs.push(out);
         }

@@ -77,6 +77,7 @@ pub(super) const ZIP_PARALLEL_MIN: u64 = 0;
 /// ZIP creation. Entries are independent, so with several threads the files are split into
 /// size-balanced groups, each compressed into a temporary ZIP by its own thread, and the
 /// compressed entries are then raw-copied (no recompression) into the final archive.
+#[allow(clippy::absurd_extreme_comparisons)] // ZIP_PARALLEL_MIN is 0 under cfg(test)
 pub(super) fn create_zip(output: &Path, items: &[Item], opts: &CreateOptions, done: &AtomicU64, total: u64, p: &Progress) -> Result<()> {
     let mut z = zip::ZipWriter::new(wr(File::create(output)?));
     let files: Vec<&Item> = items.iter().filter(|i| !i.2).collect();
@@ -91,7 +92,7 @@ pub(super) fn create_zip(output: &Path, items: &[Item], opts: &CreateOptions, do
     zip_write_items(&mut z, &dirs, opts, done, total, p)?;
     // longest-processing-time-first partitioning by file size
     let mut sized: Vec<(u64, &Item)> = files.iter().map(|i| (fs::metadata(&i.0).map(|m| m.len()).unwrap_or(0), *i)).collect();
-    sized.sort_by(|a, b| b.0.cmp(&a.0));
+    sized.sort_by_key(|b| std::cmp::Reverse(b.0));
     let mut bins: Vec<(u64, Vec<(usize, &Item)>)> = (0..t).map(|_| (0, Vec::new())).collect();
     let order: std::collections::HashMap<*const Item, usize> = files.iter().enumerate().map(|(k, i)| (*i as *const Item, k)).collect();
     for (sz, it) in sized {
@@ -117,8 +118,8 @@ pub(super) fn create_zip(output: &Path, items: &[Item], opts: &CreateOptions, do
         }).collect();
         let mut first_err = None;
         for h in hs {
-            if let Err(e) = h.join().unwrap_or_else(|_| Err(Error::Io(io::Error::other("worker panicked")))) {
-                if first_err.is_none() { first_err = Some(e); }
+            if let Err(e) = h.join().unwrap_or_else(|_| Err(Error::Io(io::Error::other("worker panicked")))) && first_err.is_none() {
+                first_err = Some(e);
             }
         }
         first_err.map_or(Ok(()), Err)
