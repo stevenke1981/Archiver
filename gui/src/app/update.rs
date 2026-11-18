@@ -179,9 +179,7 @@ fn row_pressed(m: &mut Model, fx: &mut dyn Effects, i: usize, ctrl: bool, shift:
         if !ctrl {
             m.selected.fill(false);
         }
-        for k in lo..=hi {
-            m.selected[k] = true;
-        }
+        m.selected[lo..=hi].fill(true);
     } else if ctrl {
         m.selected[i] = !m.selected[i];
         m.anchor = Some(i);

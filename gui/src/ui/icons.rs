@@ -82,7 +82,7 @@ impl Icons {
             .or_insert_with(|| {
                 let (w, h, mut rgba) = rasterise(icon.svg().as_bytes(), px)?;
                 if faded {
-                    for p in rgba.chunks_exact_mut(4) {
+                    for p in rgba.as_chunks_mut::<4>().0 {
                         let g = ((p[0] as u32 * 3 + p[1] as u32 * 6 + p[2] as u32) / 10) as u8;
                         p[0] = g;
                         p[1] = g;

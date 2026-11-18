@@ -89,7 +89,7 @@ fn decode_text(bytes: &[u8], truncated: bool) -> Option<String> {
 }
 
 fn utf16_text(bytes: &[u8], to_u16: fn([u8; 2]) -> u16) -> String {
-    let units: Vec<u16> = bytes.chunks_exact(2).map(|c| to_u16([c[0], c[1]])).collect();
+    let units: Vec<u16> = bytes.as_chunks::<2>().0.iter().map(|c| to_u16(*c)).collect();
     String::from_utf16_lossy(&units)
 }
 

@@ -108,7 +108,7 @@ jobs:
         if: runner.os == 'Windows' && always()
         with:
           name: windows-gui-screenshot
-          path: ${{ env.SHOT }}
+          path: ${{ runner.temp }}/shot.png
           if-no-files-found: ignore
       - name: Build Windows installer (Inno Setup)
         if: runner.os == 'Windows'

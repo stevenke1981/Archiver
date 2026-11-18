@@ -47,7 +47,7 @@ pub fn render_svg(data: &[u8], edge: u32) -> Option<(u32, u32, Vec<u8>)> {
 
 /// tiny-skia pixmaps are premultiplied; the scene expects straight alpha.
 pub fn unpremultiply(mut px: Vec<u8>) -> Vec<u8> {
-    for p in px.chunks_exact_mut(4) {
+    for p in px.as_chunks_mut::<4>().0 {
         let a = p[3] as u32;
         if a > 0 && a < 255 {
             for c in &mut p[..3] {
