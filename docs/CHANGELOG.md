@@ -1,5 +1,15 @@
 # 變更紀錄
 
+## v0.7.1
+
+### 修正
+
+- 「解壓縮至…」在沒有開啟或選取壓縮檔時，選好壓縮檔後只會開啟它而不解壓縮。現在會接著詢問目的資料夾並直接解壓縮；需要密碼時改為開啟壓縮檔以便輸入密碼。
+
+### CI
+
+- 將使用 Node.js 20 的 GitHub Actions 升級：`actions/checkout` v7、`actions/upload-artifact` v7、`softprops/action-gh-release` v3。
+
 ## v0.7.0
 
 ### 重大變更
