@@ -134,3 +134,76 @@ fn batch_json_and_partial_failure_code() {
     let o = rarc(&["xe", &s(&bad), "-o", &s(&t.path().join("ex2"))]);
     assert_eq!(code(&o), 1);
 }
+
+#[test]
+fn extract_overwrite_modes() {
+    let t = tempfile::tempdir().unwrap();
+    let d = sample(t.path());
+    let z = t.path().join("a.zip");
+    assert_eq!(code(&rarc(&["c", &s(&z), &s(&d), "--json"])), 0);
+    let out = t.path().join("out");
+    std::fs::create_dir_all(out.join("data")).unwrap();
+    std::fs::write(out.join("data/a.txt"), "mine").unwrap();
+
+    let o = rarc(&["x", &s(&z), "-o", &s(&out), "--overwrite", "skip", "--json"]);
+    assert_eq!(code(&o), 0);
+    let v = json(&o);
+    assert_eq!(v["skipped"], 1);
+    assert_eq!(std::fs::read_to_string(out.join("data/a.txt")).unwrap(), "mine");
+    assert_eq!(std::fs::read_to_string(out.join("data/sub/b.txt")).unwrap(), "bee");
+
+    let o = rarc(&["x", &s(&z), "-o", &s(&out), "--overwrite", "rename", "--json"]);
+    assert_eq!(code(&o), 0);
+    assert_eq!(json(&o)["renamed"], 2);
+    assert_eq!(std::fs::read_to_string(out.join("data/a (2).txt")).unwrap(), "hello hello hello");
+    assert_eq!(std::fs::read_to_string(out.join("data/a.txt")).unwrap(), "mine");
+
+    let o = rarc(&["x", &s(&z), "-o", &s(&out), "--json"]);
+    assert_eq!(code(&o), 0);
+    assert_eq!(std::fs::read_to_string(out.join("data/a.txt")).unwrap(), "hello hello hello");
+
+    assert_eq!(code(&rarc(&["x", &s(&z), "--overwrite", "bogus"])), 2);
+}
+
+#[test]
+fn rename_entry_json() {
+    let t = tempfile::tempdir().unwrap();
+    let d = sample(t.path());
+    let z = t.path().join("a.zip");
+    assert_eq!(code(&rarc(&["c", &s(&z), &s(&d), "--json"])), 0);
+    let o = rarc(&["rn", &s(&z), "data/sub", "data/renamed", "--json"]);
+    assert_eq!(code(&o), 0, "{}", String::from_utf8_lossy(&o.stdout));
+    let v = json(&o);
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["to"], "data/renamed");
+    let v = json(&rarc(&["l", &s(&z), "--json"]));
+    let names: Vec<&str> = v["entries"].as_array().unwrap().iter().map(|e| e["name"].as_str().unwrap()).collect();
+    assert!(names.contains(&"data/renamed/b.txt"), "{names:?}");
+    assert!(!names.iter().any(|n| n.starts_with("data/sub")), "{names:?}");
+
+    let o = rarc(&["rn", &s(&z), "nope.txt", "x.txt", "--json"]);
+    assert_eq!(code(&o), 1);
+    assert_eq!(json(&o)["kind"], "not_found");
+}
+
+#[test]
+fn convert_json() {
+    let t = tempfile::tempdir().unwrap();
+    let d = sample(t.path());
+    let z = t.path().join("a.zip");
+    assert_eq!(code(&rarc(&["c", &s(&z), &s(&d), "--json"])), 0);
+    let o = rarc(&["cv", &s(&z), "--format", "7z", "--json"]);
+    assert_eq!(code(&o), 0, "{}", String::from_utf8_lossy(&o.stdout));
+    let seven = t.path().join("a.7z");
+    assert_eq!(json(&o)["output"], s(&seven));
+    let v = json(&rarc(&["l", &s(&seven), "--json"]));
+    let names: Vec<&str> = v["entries"].as_array().unwrap().iter().map(|e| e["name"].as_str().unwrap()).collect();
+    assert!(names.contains(&"data/sub/b.txt"), "{names:?}");
+
+    let tgz = t.path().join("b.tar.gz");
+    let o = rarc(&["cv", &s(&seven), &s(&tgz), "--json"]);
+    assert_eq!(code(&o), 0, "{}", String::from_utf8_lossy(&o.stdout));
+    let out = t.path().join("out");
+    assert_eq!(code(&rarc(&["x", &s(&tgz), "-o", &s(&out)])), 0);
+    assert_eq!(std::fs::read_to_string(out.join("data/a.txt")).unwrap(), "hello hello hello");
+}
