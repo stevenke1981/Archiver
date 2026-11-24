@@ -2,8 +2,9 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::archive_ops::tempdir_near;
+use crate::archive_ops::{ZIPCRYPTO_UNSUPPORTED, has_zipcrypto, tempdir_near, unique_tmp};
 use crate::create::{collect, zip_write_items};
+use crate::rename::copy_tar_entry;
 use crate::*;
 
 /// Archive comment (ZIP only today). `Ok(None)` when the archive has no comment
@@ -29,7 +30,7 @@ pub fn set_comment(archive: &Path, comment: &str, p: &Progress) -> Result<()> {
     }
     p.check()?;
     // work on a copy so a crash mid-write cannot corrupt the original
-    let tmp = tmp_name(archive, ".comment.tmp");
+    let tmp = unique_tmp(archive, "comment")?;
     let res = (|| -> Result<()> {
         fs::copy(archive, &tmp)?;
         let f = fs::OpenOptions::new().read(true).write(true).open(&tmp)?;
@@ -51,12 +52,6 @@ pub fn set_comment(archive: &Path, comment: &str, p: &Progress) -> Result<()> {
     res
 }
 
-fn tmp_name(archive: &Path, suffix: &str) -> PathBuf {
-    let mut n = archive.as_os_str().to_owned();
-    n.push(suffix);
-    PathBuf::from(n)
-}
-
 fn is_tar(fmt: Format) -> bool {
     matches!(fmt, Format::Tar | Format::TarGz | Format::TarBz2 | Format::TarXz | Format::TarZst)
 }
@@ -67,6 +62,9 @@ fn is_tar(fmt: Format) -> bool {
 /// * ZIP: existing entries are raw-copied (no recompression, existing encryption and the archive
 ///   comment are kept) into a temp file next to the archive, the new entries are written with
 ///   `opts.level` / `opts.password`, then the temp file atomically replaces the archive.
+///   Archives with ZipCrypto (legacy) entries are appended to instead (a copy of the archive gets
+///   the new entries and a new central directory), because raw copies would corrupt those entries;
+///   replacing an existing file there is `Error::Unsupported`.
 /// * tar.*: existing entries are streamed (headers, modes, symlinks preserved) into a new tar in a
 ///   temp file next to the archive, then the new entries are appended.
 /// * 7z: extracted to a temp dir next to the archive and re-created.
@@ -94,7 +92,7 @@ pub fn add(archive: &Path, inputs: &[PathBuf], prefix: &str, opts: &CreateOption
     }
     let total: u64 = items.iter().filter(|i| !i.2).map(|i| fs::metadata(&i.0).map(|m| m.len()).unwrap_or(0)).sum();
     let done = AtomicU64::new(0);
-    let tmp = tmp_name(archive, ".add.tmp");
+    let tmp = unique_tmp(archive, "add")?;
     let opts = CreateOptions { format: fmt, level: opts.level, password: opts.password.clone() };
     let res = if fmt == Format::Zip {
         add_zip(archive, &tmp, &items, &opts, &done, total, p)
@@ -120,6 +118,29 @@ pub fn add(archive: &Path, inputs: &[PathBuf], prefix: &str, opts: &CreateOption
 
 fn add_zip(archive: &Path, tmp: &Path, items: &[(PathBuf, String, bool)], opts: &CreateOptions, done: &AtomicU64, total: u64, p: &Progress) -> Result<()> {
     let mut src = zip::ZipArchive::new(BufReader::with_capacity(256 << 10, File::open(archive)?))?;
+    if has_zipcrypto(&mut src)? {
+        // raw copies would corrupt ZipCrypto entries: append to a copy, leaving them untouched
+        let mut existing = std::collections::HashSet::new();
+        for i in 0..src.len() {
+            existing.insert(norm_name(src.by_index_raw(i)?.name()?.as_ref()));
+        }
+        if items.iter().any(|i| !i.2 && existing.contains(&norm_name(&i.1))) {
+            return Err(Error::Unsupported(ZIPCRYPTO_UNSUPPORTED.into()));
+        }
+        drop(src);
+        // folders that already exist are kept as they are
+        let fresh: Vec<&(PathBuf, String, bool)> = items.iter().filter(|i| !existing.contains(&norm_name(&i.1))).collect();
+        fs::copy(archive, tmp)?;
+        let f = fs::OpenOptions::new().read(true).write(true).open(tmp)?;
+        let mut out = zip::ZipWriter::new_append(f)?;
+        zip_write_items(&mut out, &fresh, opts, done, total, p)?;
+        let mut f = out.finish()?;
+        use io::Seek;
+        let end = f.stream_position()?;
+        f.set_len(end)?;
+        f.flush()?;
+        return Ok(());
+    }
     let mut out = zip::ZipWriter::new(wr(File::create(tmp)?));
     if !src.comment().is_empty() {
         out.set_raw_comment(src.comment().to_vec().into_boxed_slice())?;
@@ -157,13 +178,8 @@ fn add_tar(archive: &Path, tmp: &Path, items: &[(PathBuf, String, bool)], opts: 
         if new_names.contains(&norm_name(&path.to_string_lossy())) {
             continue;
         }
-        let mut h = e.header().clone();
-        if et.is_symlink() || et.is_hard_link() {
-            let link = e.link_name()?.map(|l| l.into_owned()).unwrap_or_default();
-            t.append_link(&mut h, &path, &link)?;
-        } else {
-            t.append_data(&mut h, &path, &mut e)?;
-        }
+        let link = if et.is_symlink() || et.is_hard_link() { Some(e.link_name()?.map(|l| l.into_owned()).unwrap_or_default()) } else { None };
+        copy_tar_entry(&mut t, &mut e, &path, link.as_deref())?;
     }
     for (path, name, is_dir) in items {
         p.check()?;
