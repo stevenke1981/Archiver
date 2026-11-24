@@ -8,6 +8,8 @@ Archiver 是跨平台（Windows / Linux / macOS）的壓縮與解壓縮工具，
 
 ### 下載與安裝
 
+系統需求：支援 Windows 10／11（64 位元）。Windows 7／8.1 不支援：Rust 1.78 起的 Windows 標準工具鏈與圖形堆疊（wgpu／winit）需要 Windows 10 以上。
+
 到 [Releases](https://github.com/stevenke1981/Archiver/releases) 下載對應平台的檔案：
 
 - **Windows**：`archiver-setup-windows-x64.exe`（安裝程式，建議）或 `archiver-windows-x64.zip`（免安裝）。
@@ -42,11 +44,17 @@ Windows 安裝程式的選項：
 - 沒有開啟壓縮檔時即為檔案管理員模式，可瀏覽本機資料夾，雙擊壓縮檔即開啟。
 - 「尋找檔案…」（Ctrl+F）依名稱過濾目前的壓縮檔或資料夾。
 - 「我的最愛」可收藏目前位置（資料夾或壓縮檔）。清單儲存在使用者設定資料夾（Windows 為 `%APPDATA%\Archiver\favorites.txt`；設定 `ARCHIVER_CONFIG_DIR` 可改變位置）。
+- 選取群組（數字鍵盤 Gray +）、取消選取群組（Gray −）、反向選取（Gray *）。遮罩支援 `*`、`?`，多個遮罩以 `;` 分隔，例如 `*.txt;report?.doc`；`*.*` 代表全部。
+- 「檔案」選單的「最近開啟的壓縮檔」最多列出 8 個。
+- 產生報告（Alt+G）：把壓縮檔的內容列成清單，輸出 TXT、CSV 或 HTML（依儲存時的副檔名）。
+- 另存壓縮檔複本（「檔案」選單）：把開啟中的壓縮檔複製到其他位置。
+- 設定保存在 `settings.json`，與 `favorites.txt` 位於同一個設定資料夾（Windows 為 `%APPDATA%\Archiver\`；設定 `ARCHIVER_CONFIG_DIR` 可改變位置）。內容包括預設格式、預覽窗格、解壓縮覆寫模式、壓縮後測試與最近開啟清單。
 
 ### 解壓縮
 
 - 全部解壓縮，或只解壓縮選取的檔案與資料夾（保留壓縮檔內的目錄結構；選取資料夾時連同其內容一起解出）。
 - 需要密碼的壓縮檔會要求輸入密碼。
+- 覆寫模式（「選項 → 解壓縮時」，GUI 與右鍵選單共用）：覆寫現有檔案（預設）、略過現有檔案、自動重新命名（新檔名為 `名稱 (2).副檔名`，依序遞增）。略過的檔案數會顯示在完成訊息中。
 - 批次解壓縮：「指令 → 分別解壓縮到各自資料夾」，或 CLI 的 `rarc xe`。單一項目失敗不會中斷整批，完成後顯示成功與失敗數。
 - 解壓縮時還原 ZIP、7z 內的修改時間；ZIP 解壓縮使用多執行緒。
 
@@ -56,6 +64,9 @@ Windows 安裝程式的選項：
 - 分批壓縮：每個選取的檔案或資料夾各自成為一個壓縮檔（建立對話框勾選「每個檔案／資料夾分別建立壓縮檔」，或 「指令 → 分批壓縮」）。
 - 加入檔案到既有壓縮檔：ZIP 直接附加；7z 與 TAR.* 會重寫整個壓縮檔，檔案大時較慢。
 - 刪除壓縮檔內的項目（ZIP、7z、TAR.*）。
+- 重新命名（F2）：壓縮檔內的檔案或資料夾（ZIP、7z、TAR.*）。ZIP 與 TAR.* 直接複製項目、不需重新壓縮；7z 會重寫壓縮檔（加密的 7z 需輸入密碼）。在資料夾檢視中可重新命名檔案與資料夾。
+- 轉換壓縮檔（Alt+Q）：把開啟中的壓縮檔（或資料夾中選取的壓縮檔）轉成其他格式，來源檔保留。
+- 建立對話框可勾選「壓縮後測試壓縮檔」與「壓縮後刪除原始檔案」。刪除前會先確認，且為永久刪除（不進資源回收筒）。
 - 壓縮檔註解（僅 ZIP）：工具列「註解」。
 - 測試壓縮檔（完整性檢查）。
 - 防毒掃描（僅 Windows）：使用 Microsoft Defender 的 `MpCmdRun.exe` 掃描目前開啟的壓縮檔，只回報、不清除。找不到 Defender 時選單不會出現此項目。
@@ -86,6 +97,20 @@ Windows 安裝程式的選項：
 | F3 | 以預設程式檢視（會先解壓到暫存資料夾） |
 | F5 | 重新整理 |
 | Alt + 選單字母 | 開啟選單（F、C、S、O、N、H） |
+| Ctrl+PageUp | 上一層 |
+| Ctrl+P | 設定預設密碼 |
+| F2 | 重新命名 |
+| Alt+A | 加入檔案到壓縮檔 |
+| Alt+E | 解壓縮至… |
+| Alt+W | 解壓縮到這裡 |
+| Alt+T | 測試壓縮檔 |
+| Alt+V | 檢視檔案 |
+| Alt+M | 註解… |
+| Alt+I ／ Alt+Enter | 顯示資訊 |
+| Alt+Z | 精靈 |
+| Alt+Q | 轉換壓縮檔 |
+| Alt+G | 產生報告 |
+| Gray + ／ Gray − ／ Gray * | 選取群組／取消選取群組／反向選取 |
 
 ## Windows 右鍵選單
 
@@ -178,13 +203,15 @@ rarc [--json] <command>
 
   l  <archive> [-p 密碼]                              列出內容
   t  <archive> [-p 密碼]                              測試壓縮檔
-  x  <archive> [-o 輸出資料夾] [-p 密碼] [項目...]     解壓縮（可只解指定項目）
+  x  <archive> [-o 輸出資料夾] [-p 密碼] [--overwrite replace|skip|rename] [項目...]   解壓縮（可只解指定項目）
   c  <輸出> <輸入...> [-l 等級] [-p 密碼]              建立（格式依輸出副檔名）
   a  <壓縮檔> <輸入...> [--prefix 資料夾] [-l 等級] [-p 密碼]   加入檔案（同名項目會被取代）
   comment show <壓縮檔>                               顯示註解（ZIP）
   comment set <壓縮檔> -m "註解"                       設定註解（空字串會刪除）
   ce <輸入...> -f <格式> [-o 輸出資料夾] [-l 等級] [-p 密碼]   分批壓縮（每個輸入各成一個壓縮檔）
-  xe <壓縮檔...> [-o 輸出資料夾] [-p 密碼]             分批解壓縮（各自解到 <壓縮檔名>/ 資料夾）
+  xe <壓縮檔...> [-o 輸出資料夾] [-p 密碼] [--overwrite replace|skip|rename]   分批解壓縮（各自解到 <壓縮檔名>/ 資料夾）
+  rn <壓縮檔> <原名稱> <新名稱> [-p 密碼]             重新命名壓縮檔內的檔案或資料夾（ZIP、7z、TAR.*）
+  cv <輸入> [輸出] [-f 格式] [-l 等級] [-p 密碼] [--src-password 密碼]   轉換壓縮檔（未指定輸出時放在輸入檔旁）
 ```
 
 範例：
@@ -196,12 +223,17 @@ rarc c out.tar.zst 資料夾 檔案.txt -l 19
 rarc a backup.zip 新檔案.txt --prefix docs
 rarc ce a.txt 照片 文件 -f zip -o 輸出資料夾
 rarc xe *.zip *.7z -o 輸出資料夾
+rarc x archive.zip -o 輸出資料夾 --overwrite rename
+rarc rn archive.zip docs/a.txt docs/b.txt
+rarc cv old.tar.gz -f 7z
 ```
 
 **給程式使用**：加上 `--json` 時，每個命令在 stdout 輸出一份 JSON 文件（一行）。
 
 - `l`：`{"ok":true,"archive":…,"count":N,"entries":[{"name","size","compressed","modified","is_dir","crc32","encrypted"}]}`
-- `t`：`{"ok":true,"archive":…,"tested":N}`；`x`：`{"ok":true,"archive","out"}`；`c`：`{"ok":true,"output"}`；`a`：`{"ok":true,"archive","prefix","added"}`
+- `t`：`{"ok":true,"archive":…,"tested":N}`；`c`：`{"ok":true,"output"}`；`a`：`{"ok":true,"archive","prefix","added"}`
+- `x`：`{"ok":true,"archive","out","skipped","renamed"}`（skipped 為略過的檔案數，renamed 為重新命名的檔案數）
+- `rn`：`{"ok":true,"archive","from","to"}`；`cv`：`{"ok":true,"input","output"}`
 - `comment show`：`{"ok":true,"archive","comment"}`（沒有註解時為 null）；`comment set`：`{"ok":true,"archive"}`
 - `ce`／`xe`：`{"ok","total","failed","results":[{"input","output","ok","error","kind"}]}`
 - 失敗：`{"ok":false,"error":"…","kind":"…"}`，其中 kind 為 `password`、`io`、`unsupported`、`cancelled`、`not_found`、`format` 之一。
@@ -286,6 +318,9 @@ core/                     archiver-core 函式庫（格式偵測、列出、解�
   src/edit.rs             註解與加入檔案
   src/batch.rs            批次壓縮與解壓縮
   src/preview.rs          預覽用的單一項目讀取
+  src/overwrite.rs        解壓縮覆寫模式（覆寫、略過、自動重新命名）
+  src/rename.rs           壓縮檔內重新命名
+  src/convert.rs          壓縮檔格式轉換
 gui/                      archiver（圖形介面）與 rarc（命令列）
   src/main.rs             進入點：參數分派、--screenshot、事件迴圈（App 實作 AcmeUI Application）
   src/args.rs             命令列參數解析與說明文字
@@ -296,10 +331,14 @@ gui/                      archiver（圖形介面）與 rarc（命令列）
     effects.rs            Effects 介面與 RealEffects（檔案對話框、執行緒、喚醒）
     menus.rs              選單與右鍵選單的內容（資料）
     worker.rs             背景工作輔助
+    winrar.rs             WinRAR 對齊功能（重新命名、選取群組、轉換、報告、設定與覆寫模式）
   src/ui/                 即時模式繪製：版面、對話框、元件、文字、圖示
   src/shell.rs            右鍵選單：Windows 登錄、Linux 與 macOS 檔案產生
   src/collect.rs          Explorer 多選合併
   src/favorites.rs        我的最愛
+  src/settings.rs         settings.json 讀寫與最近開啟清單
+  src/report.rs           內容報告（TXT、CSV、HTML）
+  src/select.rs           選取群組的檔案遮罩
   src/scan.rs             Microsoft Defender 掃描（Windows）
   src/view.rs             清單資料、暫存與剪貼簿資料夾
   src/preview.rs          預覽內容分類（文字、圖片、十六進位）
@@ -349,9 +388,11 @@ MIT License，見 [LICENSE](LICENSE)。
 **Archiver** is a cross-platform (Windows, Linux, macOS) archive manager with a WinRAR-style window. The workspace has three parts: `archiver-core` (library), `archiver` (GUI, built on AcmeUI-Native), and `rarc` (command-line tool). Release notes are in [docs/CHANGELOG.md](docs/CHANGELOG.md).
 
 - **Formats**: create ZIP, 7z, TAR (with gz, bz2, xz, zst) and single-file gz, bz2, xz, zst archives. ZIP and 7z support AES-256 passwords. RAR is read-only because the UnRAR license forbids creating RAR archives.
+- **Requirements**: Windows 10 or later (64-bit). Windows 7 and 8.1 are not supported, because Rust 1.78 and later require Windows 10 or later for the standard Windows toolchain and the wgpu/winit graphics stack.
 - **Features**: list, test, extract (all or selected entries), add and delete entries in ZIP, 7z and TAR archives, ZIP comments, live preview, copy to the system clipboard, batch compress and extract, favorites, drag and drop, and Microsoft Defender scanning on Windows.
+- **New in v0.8.0**: overwrite modes for extraction (overwrite, skip, or rename to `name (2).ext`); rename entries (F2); select, deselect and invert by mask (Gray + − *); convert archives between formats (Alt+Q); content reports as TXT, CSV or HTML (Alt+G); save an archive copy; recent archives; settings in `settings.json`; test and delete sources after creating; WinRAR-style keyboard shortcuts.
 - **Shell integration** (current user, no admin): Windows Explorer submenu under HKCU; Nautilus, Dolphin and Nemo on Linux; Finder Quick Actions on macOS. Install with `archiver --register-shell`. Multi-selection runs as a single operation.
-- **CLI**: `rarc` supports `--json` for every command and fixed exit codes: 0 ok, 1 failed, 2 usage error, 3 password required or wrong, 4 partial batch failure.
+- **CLI**: `rarc` supports `--json` for every command and fixed exit codes: 0 ok, 1 failed, 2 usage error, 3 password required or wrong, 4 partial batch failure. New in v0.8.0: `rn` (rename an entry), `cv` (convert an archive), and `--overwrite` for `x` and `xe`.
 - **Build**: Rust 1.85 or newer. On Windows use the MSVC toolchain. `cargo build --release --locked`. The renderer uses wgpu and falls back to the CPU; set `ACME_RENDER_BACKEND=auto|gpu|cpu` to choose.
 - **Limitations**: RAR is extract-only; no multi-volume or SFX creation; on macOS, "Open With" starts the app without loading the file (winit 0.30 has no open-file event); on Windows 11 the context menu needs "Show more options"; the GUI text is Traditional Chinese only. See the 已知限制 section above.
 
