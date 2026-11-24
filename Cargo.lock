@@ -274,7 +274,7 @@ dependencies = [
 
 [[package]]
 name = "archiver"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "acme-core",
  "acme-platform",
@@ -297,7 +297,7 @@ dependencies = [
 
 [[package]]
 name = "archiver-core"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "bzip2",
  "chrono",

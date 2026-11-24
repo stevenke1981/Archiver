@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use acme_platform::PlatformKey;
-use archiver_core::Entry;
+use archiver_core::{Entry, Overwrite};
 
 use super::model::{After, Field, PreviewDone};
 
@@ -46,6 +46,25 @@ pub enum Cmd {
     FavAdd,
     FavManage,
     FavOpen(usize),
+    // ---- WinRAR alignment (v0.8.0)
+    /// F2: rename the selected entry (archive) or file (folder view).
+    Rename,
+    /// Gray +: select the items matching a mask (mask dialog).
+    SelectGroup,
+    /// Gray −: deselect the items matching a mask (mask dialog).
+    DeselectGroup,
+    /// Gray *: invert the selection.
+    InvertSelection,
+    /// Alt+Q: convert the open / selected archives to another format (convert dialog).
+    Convert,
+    /// Alt+G: write a TXT / CSV / HTML listing of the open (or selected) archive.
+    Report,
+    /// File → save a copy of the open archive.
+    SaveCopy,
+    /// File menu: open the n-th recent archive.
+    RecentOpen(usize),
+    /// Options menu: overwrite policy used by every extraction.
+    SetOverwrite(Overwrite),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -92,6 +111,10 @@ pub enum DlgMsg {
     FindClear,
     FavOpen(usize),
     FavRemove(usize),
+    /// Create dialog: "test the archive after creating it".
+    ToggleTestAfter,
+    /// Create dialog: "delete the source files after archiving".
+    ToggleDeleteAfter,
 }
 
 #[derive(Debug, Clone)]

@@ -6,6 +6,7 @@ pub mod menus;
 pub mod model;
 pub mod msg;
 pub mod update;
+pub mod winrar;
 pub mod worker;
 
 pub use effects::Effects;

@@ -6,7 +6,7 @@ Guide for AI coding agents working in this repository. Human-facing docs: [READM
 
 Archiver is a cross-platform (Windows, Linux, macOS) archive manager. One Cargo workspace (`core`, `gui`) produces three things:
 
-- **`archiver-core`** (`core/`): library. List, extract, test, create, add/delete entries, ZIP comments, batch operations, single-entry reads for previews.
+- **`archiver-core`** (`core/`): library. List, extract (with an overwrite policy: replace, skip, rename), test, create, convert between formats, rename entries, add/delete entries, ZIP comments, batch operations, single-entry reads for previews.
 - **`archiver`** (`gui/src/main.rs` and `gui/src/app`, `gui/src/ui`): desktop GUI on AcmeUI-Native. It is also the entry point for shell integration and the headless `--screenshot` mode.
 - **`rarc`** (`gui/src/bin/rarc.rs`): command-line tool for people and scripts. Its `--json` output and exit codes are a stable contract.
 
@@ -20,6 +20,9 @@ Archiver is a cross-platform (Windows, Linux, macOS) archive manager. One Cargo 
 | `core/src/edit.rs` | `read_comment`, `set_comment` (ZIP), `add` (ZIP append; 7z/tar.* rewrite) |
 | `core/src/batch.rs` | `create_each`, `extract_each` (per-item results, one failure does not stop the batch) |
 | `core/src/preview.rs` | read a single entry for the preview pane |
+| `core/src/overwrite.rs` | `Overwrite` (replace, skip, rename; `key`/`from_key` for settings and `rarc --overwrite`), `extract_with`, `extract_each_with`, `ExtractStats` |
+| `core/src/rename.rs` | `rename` (ZIP, 7z, tar.*; entries and folders; 7z is rewritten, ZIP and tar copied) |
+| `core/src/convert.rs` | `convert` (re-pack into another format), `convert_output` (suggested output path) |
 | `gui/src/main.rs` | entry point: argument dispatch, `collect` merge, `screenshot()`, `App` implements `acme_platform::Application` |
 | `gui/src/args.rs` | `parse_invocation`, `Action`, `USAGE` text |
 | `gui/src/app/model.rs` | `Model` (all state), `Mode` (filesystem or archive), `Dialog`, `Popup`, `JobView` |
@@ -28,10 +31,14 @@ Archiver is a cross-platform (Windows, Linux, macOS) archive manager. One Cargo 
 | `gui/src/app/effects.rs` | `Effects` trait and `RealEffects` (rfd dialogs, threads, event-loop waker) |
 | `gui/src/app/menus.rs` | menu bar, toolbar and context menu contents as data |
 | `gui/src/app/worker.rs` | background helpers |
+| `gui/src/app/winrar.rs` | WinRAR-alignment handlers (v0.8.0): settings apply/save, recent archives, overwrite policy, rename (F2), select/deselect group and invert, convert (Alt+Q), report (Alt+G), save archive copy, create dialog's test/delete after |
 | `gui/src/ui/` | immediate-mode painter: `mod.rs` (bands, hit regions), `dialogs.rs`, `widgets.rs`, `text.rs`, `icons.rs` |
 | `gui/src/shell.rs` | context menus: Windows HKCU registry, Linux `.desktop`/Nautilus/Dolphin/Nemo, macOS Quick Actions; legacy cleanup |
 | `gui/src/collect.rs` | Explorer multi-select merge (spool directory and leader lock) |
 | `gui/src/favorites.rs` | favorites file in the per-user config directory |
+| `gui/src/settings.rs` | `settings.json` in the same config directory: load (defaults on any bad value), atomic save, recent list (max 8) |
+| `gui/src/report.rs` | archive content report: text, CSV (RFC 4180, BOM) and HTML (`ReportFormat`, `render`) |
+| `gui/src/select.rs` | file masks for select/deselect group (`*`, `?`, `;`-separated) |
 | `gui/src/scan.rs` | Microsoft Defender scan (Windows only) |
 | `gui/src/view.rs` | list item formatting, temp and clipboard staging directories |
 | `gui/src/preview.rs` | preview classification (text, image, hex) |
@@ -121,11 +128,14 @@ Renders the main window with the CPU renderer and exits (0 on success). No displ
 - Success shapes:
   - `l`: `{"ok":true,"archive","count","entries":[{"name","size","compressed","modified","is_dir","crc32","encrypted"}]}`
   - `t`: `{"ok":true,"archive","tested"}`
-  - `x`: `{"ok":true,"archive","out"}`
+  - `x`: `{"ok":true,"archive","out","skipped","renamed"}` (`skipped` and `renamed` are counts of files; both 0 with the default `replace`)
+  - `rn`: `{"ok":true,"archive","from","to"}`
+  - `cv`: `{"ok":true,"input","output"}`
   - `c`: `{"ok":true,"output"}`
   - `a`: `{"ok":true,"archive","prefix","added"}`
   - `comment show`: `{"ok":true,"archive","comment"}` (`null` when none); `comment set`: `{"ok":true,"archive"}`
   - `ce`, `xe`: `{"ok","total","failed","results":[{"input","output","ok","error","kind"}]}`
+- `x` and `xe` take `--overwrite replace|skip|rename` (default `replace`). The value is parsed by `Overwrite::from_key`; an unknown value is a usage error (exit 2).
 - Failure shape: `{"ok":false,"error":"...","kind":"..."}`, where `kind` is one of `password`, `io`, `unsupported`, `cancelled`, `not_found`, `format`.
 - Smoke test (same as CI):
 

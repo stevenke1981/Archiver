@@ -10,6 +10,7 @@ use crate::app::update::*;
 use crate::app::worker::read_head;
 use crate::app::effects::JobFn;
 use crate::app::*;
+use crate::settings::Settings;
 use crate::view::{self, Item};
 
 /// Records side effects; jobs are queued and run on demand.
@@ -26,6 +27,9 @@ struct Fx {
     previews: Vec<(u64, String)>,
     favorites: Vec<PathBuf>,
     registered: bool,
+    /// In-memory settings file and the number of saves.
+    settings: Settings,
+    saves: usize,
 }
 
 impl Fx {
@@ -115,6 +119,15 @@ impl Effects for Fx {
     }
     fn remove_dir_later(&mut self, dir: PathBuf) {
         self.log.push(format!("rmdir {}", dir.display()));
+    }
+    fn settings_load(&mut self) -> Settings {
+        self.settings.clone()
+    }
+    fn settings_save(&mut self, s: &Settings) -> Result<(), String> {
+        self.settings = s.clone();
+        self.saves += 1;
+        self.log.push("settings_save".into());
+        Ok(())
     }
     fn close(&mut self) {
         self.closed = true;
@@ -478,7 +491,9 @@ fn toolbar_menu_state_follows_the_mode() {
     let c = cmds(&m);
     assert!(c.contains(&("刪除檔案".into(), false)));
     assert!(c.contains(&("註解…".into(), false)));
-    assert!(c.contains(&("防毒掃描".into(), false)));
+    assert!(c.contains(&("重新命名…".into(), false)));
+    let tools: Vec<(String, bool)> = menu_entries(&m, 2).into_iter().map(|e| (e.label, e.enabled)).collect();
+    assert!(tools.contains(&("防毒掃描".into(), false)));
     let mut busy = m.clone();
     busy.job = Some(JobView::default());
     assert!(cmds(&busy).contains(&("解壓縮至…".into(), false)));
@@ -1024,4 +1039,455 @@ fn cancelled_batches_report_cancel_not_errors() {
     assert_eq!(m.status, "已取消");
     assert!(fx.log.iter().all(|l| !l.starts_with("error ")));
     assert!(fx.closed, "a cancelled shell job closes its window");
+}
+
+// ------------------------------------------------------------------ WinRAR alignment (v0.8.0)
+
+use crate::app::winrar;
+use archiver_core::Overwrite;
+
+fn alt(c: &str) -> Msg {
+    Msg::Key(KeyPress { ctrl: false, alt: true, ..KeyPress::ctrl_char(c) })
+}
+
+fn chr(c: &str) -> Msg {
+    Msg::Key(KeyPress { ctrl: false, text: Some(c.into()), ..KeyPress::ctrl_char(c) })
+}
+
+/// Archive with a single top-level `a.txt` ("new").
+fn one_file_zip(dir: &Path) -> PathBuf {
+    let src = dir.join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("a.txt"), b"new").unwrap();
+    let archive = dir.join("one.zip");
+    archiver_core::create(&archive, &[src.join("a.txt")], &CreateOptions { format: Format::Zip, level: None, password: None }, &Progress::none()).unwrap();
+    assert_eq!(archiver_core::list(&archive, None).unwrap().iter().map(|e| e.name.clone()).collect::<Vec<_>>(), ["a.txt"]);
+    archive
+}
+
+fn select_named(m: &mut Model, fx: &mut Fx, name: &str) {
+    let i = m.items.iter().position(|i| i.name == name).unwrap_or_else(|| panic!("{name} not listed"));
+    update(m, press(i, false, false), fx);
+}
+
+#[test]
+fn overwrite_policy_reaches_extraction() {
+    let t = tempfile::tempdir().unwrap();
+    let archive = one_file_zip(t.path());
+    let out = t.path().join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    std::fs::write(out.join("a.txt"), b"old").unwrap();
+    let (mut m, mut fx) = (Model::new(t.path().to_path_buf()), Fx::default());
+    upd_open(&mut m, &mut fx, &archive);
+    fx.folder = Some(out.clone());
+
+    update(&mut m, Msg::Cmd(Cmd::SetOverwrite(Overwrite::Skip)), &mut fx);
+    update(&mut m, Msg::Cmd(Cmd::ExtractAll), &mut fx);
+    fx.run_jobs(&mut m);
+    assert_eq!(std::fs::read(out.join("a.txt")).unwrap(), b"old");
+    assert!(m.status.contains("略過 1 個已存在的檔案"), "{}", m.status);
+
+    update(&mut m, Msg::Cmd(Cmd::SetOverwrite(Overwrite::Rename)), &mut fx);
+    update(&mut m, Msg::Cmd(Cmd::ExtractAll), &mut fx);
+    fx.run_jobs(&mut m);
+    assert_eq!(std::fs::read(out.join("a.txt")).unwrap(), b"old");
+    assert_eq!(std::fs::read(out.join("a (2).txt")).unwrap(), b"new");
+    assert!(m.status.contains("重新命名 1 個"), "{}", m.status);
+
+    update(&mut m, Msg::Cmd(Cmd::SetOverwrite(Overwrite::Replace)), &mut fx);
+    update(&mut m, Msg::Cmd(Cmd::ExtractAll), &mut fx);
+    fx.run_jobs(&mut m);
+    assert_eq!(std::fs::read(out.join("a.txt")).unwrap(), b"new");
+
+    // the shell's "extract here" uses the policy too
+    let beside = t.path().join("a.txt");
+    std::fs::write(&beside, b"old").unwrap();
+    let (mut m, mut fx) = (Model::new(t.path().to_path_buf()), Fx::default());
+    m.overwrite = Overwrite::Skip;
+    extract_batch(&mut m, &mut fx, vec![archive], false);
+    fx.run_jobs(&mut m);
+    assert_eq!(std::fs::read(&beside).unwrap(), b"old");
+}
+
+#[test]
+fn settings_are_saved_on_change_and_applied_at_start() {
+    let (mut m, mut fx) = (model_with(rows()), Fx::default());
+    update(&mut m, Msg::Cmd(Cmd::SetOverwrite(Overwrite::Rename)), &mut fx);
+    assert_eq!(fx.settings.overwrite, Overwrite::Rename);
+    assert_eq!(fx.saves, 1);
+    // unchanged: no write
+    update(&mut m, Msg::Cmd(Cmd::SetOverwrite(Overwrite::Rename)), &mut fx);
+    assert_eq!(fx.saves, 1);
+    update(&mut m, Msg::Cmd(Cmd::TogglePreview), &mut fx);
+    assert!(!fx.settings.preview_visible);
+
+    // start-up
+    let mut m2 = model_with(rows());
+    fx.settings.last_format = 999;
+    fx.settings.test_after = true;
+    winrar::apply_settings(&mut m2, fx.settings_load());
+    assert_eq!(m2.overwrite, Overwrite::Rename);
+    assert!(!m2.preview_visible && m2.test_after);
+    assert_eq!(m2.last_format, Format::writable().len() - 1, "clamped");
+    assert_eq!(winrar::settings_of(&m2).overwrite, Overwrite::Rename);
+}
+
+#[test]
+fn overwrite_menu_entries_are_checked() {
+    let mut m = model_with(rows());
+    let checked = |m: &Model| {
+        menu_entries(m, 4)
+            .into_iter()
+            .filter_map(|e| match e.msg {
+                Some(Msg::Cmd(Cmd::SetOverwrite(o))) => Some((o, e.checked)),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(checked(&m), [(Overwrite::Replace, Some(true)), (Overwrite::Skip, Some(false)), (Overwrite::Rename, Some(false))]);
+    m.overwrite = Overwrite::Skip;
+    assert_eq!(checked(&m), [(Overwrite::Replace, Some(false)), (Overwrite::Skip, Some(true)), (Overwrite::Rename, Some(false))]);
+    assert!(menu_entries(&m, 4).iter().any(|e| e.label == "解壓縮時：略過現有檔案"));
+}
+
+#[test]
+fn recent_archives_push_open_and_drop_missing() {
+    let t = tempfile::tempdir().unwrap();
+    let archive = sample_zip(t.path());
+    let (mut m, mut fx) = (Model::new(t.path().to_path_buf()), Fx::default());
+    assert!(!menu_entries(&m, 0).iter().any(|e| matches!(e.msg, Some(Msg::Cmd(Cmd::RecentOpen(_))))));
+    upd_open(&mut m, &mut fx, &archive);
+    assert_eq!(m.recent, std::slice::from_ref(&archive));
+    assert_eq!(fx.settings.recent, std::slice::from_ref(&archive));
+    // F5 re-lists the same archive: no extra save
+    let saves = fx.saves;
+    update(&mut m, Msg::Cmd(Cmd::Refresh), &mut fx);
+    fx.run_jobs(&mut m);
+    assert_eq!(fx.saves, saves);
+    let entry = menu_entries(&m, 0).into_iter().find(|e| matches!(e.msg, Some(Msg::Cmd(Cmd::RecentOpen(0))))).unwrap();
+    assert!(entry.label.starts_with("1 ") && entry.label.contains("selection.zip"), "{}", entry.label);
+    update(&mut m, Msg::Cmd(Cmd::Up), &mut fx);
+    assert!(!m.in_archive());
+    update(&mut m, Msg::Cmd(Cmd::RecentOpen(0)), &mut fx);
+    fx.run_jobs(&mut m);
+    assert!(m.in_archive());
+    // gone from disk: removed from the list
+    std::fs::remove_file(&archive).unwrap();
+    update(&mut m, Msg::Cmd(Cmd::RecentOpen(0)), &mut fx);
+    assert_eq!(fx.jobs.len(), 1, "no file-system check in update(): the listing job does it");
+    assert_eq!(m.recent.len(), 1);
+    fx.run_jobs(&mut m);
+    assert!(m.recent.is_empty() && fx.settings.recent.is_empty());
+    assert!(m.status.starts_with("找不到") && m.status.contains("最近開啟"), "{}", m.status);
+    assert!(fx.jobs.is_empty() && m.job.is_none());
+}
+
+#[test]
+fn rename_file_refuses_existing_and_allows_case_only_change() {
+    let t = tempfile::tempdir().unwrap();
+    let (a, b) = (t.path().join("a.txt"), t.path().join("b.txt"));
+    std::fs::write(&a, "a").unwrap();
+    std::fs::write(&b, "b").unwrap();
+    assert!(winrar::rename_file(&a, &b).unwrap_err().contains("已存在"));
+    assert_eq!(std::fs::read_to_string(&b).unwrap(), "b");
+    // case-only change: works on every platform and the new case sticks
+    let up = t.path().join("A.TXT");
+    winrar::rename_file(&a, &up).unwrap();
+    let names: Vec<String> = std::fs::read_dir(t.path()).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().to_string()).collect();
+    assert!(names.contains(&"A.TXT".to_string()) && !names.contains(&"a.txt".to_string()), "{names:?}");
+    assert!(!names.iter().any(|n| n.ends_with(".archiver-rename")), "{names:?}");
+    assert_eq!(std::fs::read_to_string(&up).unwrap(), "a");
+}
+
+#[test]
+fn rename_inside_a_zip_keeps_the_folder() {
+    let t = tempfile::tempdir().unwrap();
+    let archive = sample_zip(t.path());
+    let (mut m, mut fx) = (Model::new(t.path().to_path_buf()), Fx::default());
+    upd_open(&mut m, &mut fx, &archive);
+    update(&mut m, key(PlatformKey::Function(2)), &mut fx);
+    assert!(m.dialog.is_none(), "nothing selected");
+    update(&mut m, Msg::RowActivated(1), &mut fx); // data/
+    select_named(&mut m, &mut fx, "other.txt");
+    assert!(context_entries(&m).iter().any(|e| e.label == "重新命名…" && e.enabled));
+    update(&mut m, key(PlatformKey::Function(2)), &mut fx);
+    match &m.dialog {
+        Some(Dialog::Rename { from, fs, text }) => {
+            assert_eq!((from.as_str(), *fs, text.text.as_str()), ("data/other.txt", false, "other.txt"));
+            assert_eq!(text.selection(), Some((0, "other.txt".len())), "whole name selected");
+        }
+        other => panic!("{other:?}"),
+    }
+    // invalid names keep the dialog open
+    update(&mut m, Msg::Text("x/y".into()), &mut fx);
+    update(&mut m, key(PlatformKey::Enter), &mut fx);
+    assert!(matches!(m.dialog, Some(Dialog::Rename { .. })) && fx.jobs.is_empty());
+    if let Some(i) = m.input_mut(Field::Rename) {
+        set_input_text(i, "renamed.txt");
+    }
+    update(&mut m, key(PlatformKey::Enter), &mut fx);
+    assert!(m.dialog.is_none());
+    fx.run_jobs(&mut m);
+    let names: Vec<String> = archiver_core::list(&archive, None).unwrap().into_iter().map(|e| e.name).collect();
+    assert!(names.iter().any(|n| n == "data/renamed.txt") && !names.iter().any(|n| n == "data/other.txt"), "{names:?} {}", m.status);
+    assert!(m.items.iter().any(|i| i.name == "renamed.txt"), "still in data/");
+    assert!(m.status.contains("renamed.txt"), "{}", m.status);
+}
+
+#[test]
+fn rename_is_refused_for_single_file_formats() {
+    let t = tempfile::tempdir().unwrap();
+    let (mut m, mut fx) = (Model::new(t.path().to_path_buf()), Fx::default());
+    let e = Entry { name: "a.txt".into(), size: 1, compressed: None, modified: None, is_dir: false, crc32: None, encrypted: false };
+    show_listing(&mut m, &mut fx, t.path().join("a.txt.gz"), vec![e]);
+    update(&mut m, press(1, false, false), &mut fx);
+    update(&mut m, Msg::Cmd(Cmd::Rename), &mut fx);
+    assert!(m.dialog.is_none());
+    assert_eq!(m.status, "此格式不支援重新命名");
+}
+
+#[test]
+fn rename_in_folder_view_never_replaces() {
+    let t = tempfile::tempdir().unwrap();
+    std::fs::write(t.path().join("a.txt"), b"a").unwrap();
+    std::fs::write(t.path().join("c.txt"), b"c").unwrap();
+    let (mut m, mut fx) = (Model::new(t.path().to_path_buf()), Fx::default());
+    refresh(&mut m, &mut fx);
+    select_named(&mut m, &mut fx, "a.txt");
+    update(&mut m, key(PlatformKey::Function(2)), &mut fx);
+    assert!(matches!(&m.dialog, Some(Dialog::Rename { fs: true, .. })));
+    update(&mut m, Msg::Text("b.txt".into()), &mut fx);
+    update(&mut m, key(PlatformKey::Enter), &mut fx);
+    fx.run_jobs(&mut m);
+    assert!(t.path().join("b.txt").is_file() && !t.path().join("a.txt").exists());
+    assert!(m.items.iter().any(|i| i.name == "b.txt"));
+    // the target exists: error, nothing replaced
+    select_named(&mut m, &mut fx, "b.txt");
+    update(&mut m, Msg::Cmd(Cmd::Rename), &mut fx);
+    update(&mut m, Msg::Text("c.txt".into()), &mut fx);
+    update(&mut m, Msg::Dialog(DlgMsg::Ok), &mut fx);
+    fx.run_jobs(&mut m);
+    assert_eq!(std::fs::read(t.path().join("c.txt")).unwrap(), b"c");
+    assert!(t.path().join("b.txt").is_file());
+    assert!(fx.log.iter().any(|l| l.starts_with("error ") && l.contains("已存在")), "{:?}", fx.log);
+}
+
+#[test]
+fn select_group_deselect_group_and_invert() {
+    let (mut m, mut fx) = (model_with(rows()), Fx::default());
+    update(&mut m, chr("+"), &mut fx);
+    match &m.dialog {
+        Some(Dialog::SelectMask { select: true, text }) => assert_eq!((text.text.as_str(), text.selection()), ("*.*", Some((0, 3)))),
+        other => panic!("{other:?}"),
+    }
+    update(&mut m, Msg::Text("*.txt".into()), &mut fx);
+    update(&mut m, key(PlatformKey::Enter), &mut fx);
+    assert_eq!(m.selected, [false, true, false, true, false]);
+    assert_eq!(m.last_mask, "*.txt");
+    update(&mut m, chr("-"), &mut fx);
+    assert!(matches!(&m.dialog, Some(Dialog::SelectMask { select: false, text }) if text.text == "*.txt"));
+    update(&mut m, Msg::Text("a*".into()), &mut fx);
+    update(&mut m, key(PlatformKey::Enter), &mut fx);
+    assert_eq!(m.selected, [false, false, false, true, false]);
+    update(&mut m, chr("*"), &mut fx);
+    assert_eq!(m.selected, [false, true, true, false, true]);
+    // *.* means everything (also names without a dot)
+    update(&mut m, Msg::Cmd(Cmd::SelectGroup), &mut fx);
+    update(&mut m, Msg::Text("*.*".into()), &mut fx);
+    update(&mut m, Msg::Dialog(DlgMsg::Ok), &mut fx);
+    assert_eq!(m.selected, [false, true, true, true, true]);
+}
+
+#[test]
+fn convert_zip_to_7z() {
+    let t = tempfile::tempdir().unwrap();
+    let archive = sample_zip(t.path());
+    let (mut m, mut fx) = (Model::new(t.path().to_path_buf()), Fx::default());
+    refresh(&mut m, &mut fx);
+    select_named(&mut m, &mut fx, "selection.zip");
+    update(&mut m, alt("q"), &mut fx);
+    let Some(Dialog::Convert(d)) = &m.dialog else { panic!("convert dialog expected") };
+    assert_eq!(d.sources, std::slice::from_ref(&archive));
+    let seven = Format::writable().iter().position(|f| *f == Format::SevenZ).unwrap();
+    update(&mut m, Msg::Dialog(DlgMsg::OpenFormats { x: 0.0, y: 0.0, w: 100.0 }), &mut fx);
+    let entries = crate::app::menus::popup_entries(&m, m.popup.unwrap());
+    assert_eq!(entries[0].checked, Some(true));
+    update(&mut m, Msg::Dialog(DlgMsg::SetFormat(seven)), &mut fx);
+    update(&mut m, Msg::Dialog(DlgMsg::LevelStep(1)), &mut fx);
+    let Some(Dialog::Convert(d)) = &m.dialog else { panic!() };
+    assert_eq!(d.fmt(), Format::SevenZ);
+    assert_eq!(m.dialog.as_ref().unwrap().fields(), [Field::ConvertPassword]);
+    update(&mut m, Msg::Dialog(DlgMsg::Ok), &mut fx);
+    assert!(m.dialog.is_none() && m.busy());
+    fx.run_jobs(&mut m);
+    let out = t.path().join("selection.7z");
+    assert!(out.is_file(), "{} {:?}", m.status, fx.log);
+    assert_eq!(archiver_core::list(&out, None).unwrap().iter().filter(|e| !e.is_dir).count(), 4);
+    assert!(m.items.iter().any(|i| i.name == "selection.7z"));
+    assert_eq!(m.last_format, 0, "the create dialog's format is not changed");
+    // nothing open or selected: a picker; cancelled = nothing happens
+    update(&mut m, Msg::ClearSelection, &mut fx);
+    update(&mut m, Msg::Cmd(Cmd::Convert), &mut fx);
+    assert!(fx.log.iter().any(|l| l == "pick_files 選擇要轉換的壓縮檔") && m.dialog.is_none());
+}
+
+#[test]
+fn report_writes_csv_when_asked() {
+    let t = tempfile::tempdir().unwrap();
+    let archive = sample_zip(t.path());
+    let (mut m, mut fx) = (Model::new(t.path().to_path_buf()), Fx::default());
+    update(&mut m, alt("g"), &mut fx);
+    assert!(m.status.starts_with("請先開啟壓縮檔"), "{}", m.status);
+    upd_open(&mut m, &mut fx, &archive);
+    let out = t.path().join("list.csv");
+    fx.folder = Some(out.clone());
+    update(&mut m, alt("g"), &mut fx);
+    assert!(fx.log.iter().any(|l| l == "save_file 產生報告"));
+    fx.run_jobs(&mut m);
+    let text = std::fs::read_to_string(&out).unwrap();
+    assert!(text.contains("other.txt") && text.contains(','), "{text}");
+    assert!(m.status.starts_with("已產生報告"), "{}", m.status);
+    // folder view: the selected archive is listed first
+    update(&mut m, Msg::Cmd(Cmd::Up), &mut fx);
+    assert!(!m.in_archive());
+    select_named(&mut m, &mut fx, "selection.zip");
+    let out = t.path().join("list.txt");
+    fx.folder = Some(out.clone());
+    update(&mut m, Msg::Cmd(Cmd::Report), &mut fx);
+    fx.run_jobs(&mut m);
+    assert!(std::fs::read_to_string(&out).unwrap().contains("中文.txt"));
+}
+
+#[test]
+fn save_copy_of_the_open_archive() {
+    let t = tempfile::tempdir().unwrap();
+    let archive = sample_zip(t.path());
+    let (mut m, mut fx) = (Model::new(t.path().to_path_buf()), Fx::default());
+    update(&mut m, Msg::Cmd(Cmd::SaveCopy), &mut fx);
+    assert_eq!(m.status, "請先開啟壓縮檔");
+    upd_open(&mut m, &mut fx, &archive);
+    assert!(menu_entries(&m, 0).iter().any(|e| e.label == "另存壓縮檔複本…" && e.enabled));
+    fx.folder = Some(archive.clone());
+    update(&mut m, Msg::Cmd(Cmd::SaveCopy), &mut fx);
+    assert!(fx.jobs.is_empty() && m.status == "複本不能與原壓縮檔相同");
+    let copy = t.path().join("copy.zip");
+    fx.folder = Some(copy.clone());
+    update(&mut m, Msg::Cmd(Cmd::SaveCopy), &mut fx);
+    fx.run_jobs(&mut m);
+    assert_eq!(std::fs::read(&copy).unwrap(), std::fs::read(&archive).unwrap());
+    assert!(m.status.starts_with("已另存複本"), "{}", m.status);
+}
+
+#[test]
+fn create_with_test_and_delete_after() {
+    let t = tempfile::tempdir().unwrap();
+    let f = t.path().join("note.txt");
+    std::fs::write(&f, b"hello").unwrap();
+    let (mut m, mut fx) = (Model::new(t.path().to_path_buf()), Fx::default());
+    refresh(&mut m, &mut fx);
+    open_create(&mut m, vec![f.clone()], None);
+    update(&mut m, Msg::Dialog(DlgMsg::ToggleTestAfter), &mut fx);
+    update(&mut m, Msg::Dialog(DlgMsg::ToggleDeleteAfter), &mut fx);
+    assert!(m.test_after && fx.settings.test_after, "test_after is remembered");
+    // declined: nothing starts, the dialog stays
+    update(&mut m, Msg::Dialog(DlgMsg::Ok), &mut fx);
+    assert!(fx.log.iter().any(|l| l == "confirm 刪除原始檔案"));
+    assert!(matches!(m.dialog, Some(Dialog::Create(_))) && fx.jobs.is_empty());
+    fx.confirm = true;
+    update(&mut m, Msg::Dialog(DlgMsg::Ok), &mut fx);
+    fx.run_jobs(&mut m);
+    assert!(t.path().join("note.txt.zip").is_file());
+    assert!(!f.exists(), "source deleted");
+    assert!(m.status.contains("測試正確") && m.status.contains("已刪除 1 個原始項目"), "{}", m.status);
+    // the next dialog starts with "test after" on, "delete after" off
+    std::fs::write(&f, b"again").unwrap();
+    open_create(&mut m, vec![f.clone()], None);
+    let Some(Dialog::Create(d)) = &m.dialog else { panic!() };
+    assert!(d.test_after && !d.delete_after);
+    update(&mut m, Msg::Dialog(DlgMsg::Cancel), &mut fx);
+
+    // a failed create keeps the sources
+    open_create(&mut m, vec![f.clone()], None);
+    update(&mut m, Msg::Dialog(DlgMsg::ToggleDeleteAfter), &mut fx);
+    if let Some(i) = m.input_mut(Field::CreateOutput) {
+        set_input_text(i, &f.join("x.zip").display().to_string());
+    }
+    update(&mut m, Msg::Dialog(DlgMsg::Ok), &mut fx);
+    fx.run_jobs(&mut m);
+    assert!(f.is_file(), "kept after a failed create");
+    assert!(m.status.starts_with("錯誤"), "{}", m.status);
+}
+
+#[test]
+fn batch_create_deletes_only_successful_sources() {
+    let t = tempfile::tempdir().unwrap();
+    let (a, b) = (t.path().join("a.txt"), t.path().join("b.txt"));
+    std::fs::write(&a, b"a").unwrap();
+    std::fs::write(&b, b"b").unwrap();
+    let (mut m, mut fx) = (Model::new(t.path().to_path_buf()), Fx { confirm: true, ..Fx::default() });
+    open_create(&mut m, vec![a.clone(), b.clone()], Some(true));
+    update(&mut m, Msg::Dialog(DlgMsg::ToggleTestAfter), &mut fx);
+    update(&mut m, Msg::Dialog(DlgMsg::ToggleDeleteAfter), &mut fx);
+    update(&mut m, Msg::Dialog(DlgMsg::Ok), &mut fx);
+    fx.run_jobs(&mut m);
+    assert!(t.path().join("a.txt.zip").is_file() && t.path().join("b.txt.zip").is_file());
+    assert!(!a.exists() && !b.exists());
+    assert!(m.status.starts_with("已完成 2 個（成功 2，失敗 0），測試正確 2 個，已刪除 2 個原始項目"), "{}", m.status);
+}
+
+#[test]
+fn delete_source_protects_the_output() {
+    let t = tempfile::tempdir().unwrap();
+    let dir = t.path().join("data");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("x.zip"), b"zip").unwrap();
+    assert_eq!(winrar::delete_source(&dir, &[dir.join("x.zip")]), Ok(false));
+    assert!(dir.join("x.zip").is_file());
+    assert_eq!(winrar::delete_source(&dir.join("x.zip"), &[dir.join("x.zip")]), Ok(false));
+    assert_eq!(winrar::delete_source(&dir, &[t.path().join("other.zip")]), Ok(true));
+    assert!(!dir.exists());
+    assert_eq!(winrar::delete_source(&dir, &[]), Ok(false), "already gone");
+}
+
+#[test]
+fn winrar_keyboard_shortcuts_dispatch() {
+    let t = tempfile::tempdir().unwrap();
+    std::fs::write(t.path().join("a.txt"), b"a").unwrap();
+    std::fs::create_dir(t.path().join("sub")).unwrap();
+    let (mut m, mut fx) = (Model::new(t.path().join("sub")), Fx::default());
+    refresh(&mut m, &mut fx);
+    // Ctrl+PageUp: parent folder
+    update(&mut m, Msg::Key(KeyPress { ctrl: true, ..KeyPress::plain(PlatformKey::PageUp) }), &mut fx);
+    assert_eq!(m.location(), t.path());
+    select_named(&mut m, &mut fx, "a.txt");
+    update(&mut m, alt("a"), &mut fx);
+    assert!(matches!(m.dialog, Some(Dialog::Create(_))));
+    update(&mut m, key(PlatformKey::Escape), &mut fx);
+    update(&mut m, key(PlatformKey::Function(2)), &mut fx);
+    assert!(matches!(m.dialog, Some(Dialog::Rename { .. })));
+    // inside a dialog the list shortcuts do not fire: "*" is typed into the field
+    update(&mut m, chr("*"), &mut fx);
+    assert!(matches!(&m.dialog, Some(Dialog::Rename { text, .. }) if text.text == "*"));
+    update(&mut m, key(PlatformKey::Escape), &mut fx);
+    update(&mut m, chr("*"), &mut fx);
+    assert!(m.items.iter().zip(&m.selected).all(|(i, s)| *s == (!i.is_parent && i.name != "a.txt")));
+    update(&mut m, Msg::Key(KeyPress::ctrl_char("p")), &mut fx);
+    assert!(matches!(m.dialog, Some(Dialog::Password(_))));
+    update(&mut m, key(PlatformKey::Escape), &mut fx);
+    update(&mut m, Msg::Key(KeyPress { alt: true, ..KeyPress::plain(PlatformKey::Enter) }), &mut fx);
+    assert!(matches!(m.dialog, Some(Dialog::Info(_))));
+    update(&mut m, key(PlatformKey::Escape), &mut fx);
+    update(&mut m, alt("i"), &mut fx);
+    assert!(matches!(m.dialog, Some(Dialog::Info(_))));
+    update(&mut m, key(PlatformKey::Escape), &mut fx);
+    update(&mut m, alt("e"), &mut fx);
+    assert!(fx.log.iter().any(|l| l.starts_with("pick_file")), "{:?}", fx.log);
+    update(&mut m, alt("t"), &mut fx);
+    assert_eq!(m.status, "請先開啟或選取壓縮檔");
+    // the menu letters still open menus
+    update(&mut m, alt("f"), &mut fx);
+    assert_eq!(m.popup, Some(Popup::Menu(0)));
+    let labels: Vec<(String, &str)> = menu_entries(&m, 1).into_iter().map(|e| (e.label, e.shortcut)).collect();
+    assert!(labels.contains(&("重新命名…".into(), "F2")) && labels.contains(&("加入檔案到壓縮檔…".into(), "Alt+A")));
+    assert!(menu_entries(&m, 0).iter().any(|e| e.label == "選取群組…" && e.shortcut == "Gray +"));
 }

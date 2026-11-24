@@ -511,6 +511,12 @@ use archive_ops::*;
 use create::*;
 pub use archive_ops::{delete, extract, list, test};
 pub use create::{CreateOptions, create, suggest_output};
+mod convert;
+mod overwrite;
+mod rename;
+pub use convert::{convert, convert_output};
+pub use overwrite::{ExtractOptions, ExtractStats, Overwrite, extract_each_with, extract_with};
+pub use rename::rename;
 
 #[cfg(test)]
 mod tests;

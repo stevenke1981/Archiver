@@ -14,6 +14,27 @@ use super::model::After;
 use super::msg::Msg;
 use super::worker;
 use crate::clipboard::Clip;
+use crate::settings::Settings;
+
+/// Single writer thread for settings.json: snapshots arrive in order and only the newest one of
+/// a burst is written, so an older snapshot can never overwrite a newer one (last write wins).
+fn settings_writer() -> &'static Sender<Settings> {
+    static TX: std::sync::OnceLock<Sender<Settings>> = std::sync::OnceLock::new();
+    TX.get_or_init(|| {
+        let (tx, rx) = channel::<Settings>();
+        std::thread::spawn(move || {
+            while let Ok(mut s) = rx.recv() {
+                while let Ok(newer) = rx.try_recv() {
+                    s = newer;
+                }
+                if let Err(e) = crate::settings::save(&s) {
+                    eprintln!("無法儲存設定：{e}");
+                }
+            }
+        });
+        tx
+    })
+}
 
 /// A background job: runs on a worker thread and reports back with a [`Msg`].
 pub type JobFn = Box<dyn FnOnce(&Progress) -> Msg + Send + 'static>;
@@ -44,6 +65,9 @@ pub trait Effects {
     fn favorites_remove(&mut self, path: &Path) -> Result<(), String>;
     /// Delete a no longer needed staging folder in the background.
     fn remove_dir_later(&mut self, dir: PathBuf);
+    /// Persisted GUI settings (defaults when there are none).
+    fn settings_load(&mut self) -> Settings;
+    fn settings_save(&mut self, s: &Settings) -> Result<(), String>;
     /// Close the main window (quits the application).
     fn close(&mut self);
 }
@@ -64,6 +88,8 @@ pub struct RealEffects {
     pv_cancel: Arc<AtomicBool>,
     clip: Clip,
     pub closing: bool,
+    /// Read and write the user's settings file (off for `--screenshot` and in unit tests).
+    pub persist: bool,
 }
 
 impl Default for RealEffects {
@@ -75,7 +101,7 @@ impl Default for RealEffects {
 impl RealEffects {
     pub fn new() -> Self {
         let (pv_tx, pv_rx) = channel();
-        RealEffects { waker: None, job: None, pv_tx, pv_rx, pv_cancel: Arc::new(AtomicBool::new(false)), clip: Clip::new(), closing: false }
+        RealEffects { waker: None, job: None, pv_tx, pv_rx, pv_cancel: Arc::new(AtomicBool::new(false)), clip: Clip::new(), closing: false, persist: !cfg!(test) }
     }
 
     /// Finished background results (job and previews), oldest first.
@@ -229,6 +255,15 @@ impl Effects for RealEffects {
     }
     fn remove_dir_later(&mut self, dir: PathBuf) {
         std::thread::spawn(move || std::fs::remove_dir_all(dir));
+    }
+    fn settings_load(&mut self) -> Settings {
+        if self.persist { crate::settings::load() } else { Settings::default() }
+    }
+    fn settings_save(&mut self, s: &Settings) -> Result<(), String> {
+        if !self.persist {
+            return Ok(());
+        }
+        settings_writer().send(s.clone()).map_err(|e| e.to_string())
     }
     fn close(&mut self) {
         self.closing = true;

@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use acme_core::Rgba8Image;
 use acme_textinput::TextInputState;
-use archiver_core::{Entry, Format};
+use archiver_core::{Entry, Format, Overwrite};
 
 use crate::view::{self, Item};
 
@@ -52,6 +52,12 @@ pub enum Field {
     Password,
     Find,
     Comment,
+    /// Rename dialog: the new name (last path component only).
+    Rename,
+    /// Select / deselect group dialog: the file mask(s).
+    Mask,
+    /// Convert dialog: optional password of the new archives.
+    ConvertPassword,
 }
 
 #[derive(Debug, Clone)]
@@ -62,9 +68,31 @@ pub struct CreateDlg {
     pub each: bool,
     pub password: TextInputState,
     pub output: TextInputState,
+    /// Test the new archive(s) after creating them (persisted in the settings).
+    pub test_after: bool,
+    /// Delete the source files after archiving (only after a successful create, and after a
+    /// successful test when `test_after` is set). Never persisted.
+    pub delete_after: bool,
 }
 
 impl CreateDlg {
+    pub fn fmt(&self) -> Format {
+        let all = Format::writable();
+        all[self.format.min(all.len() - 1)]
+    }
+}
+
+/// Convert dialog (Alt+Q): re-pack `sources` into `format`, next to each source.
+#[derive(Debug, Clone)]
+pub struct ConvertDlg {
+    pub sources: Vec<PathBuf>,
+    /// Index into [`Format::writable`].
+    pub format: usize,
+    pub level: u32,
+    pub password: TextInputState,
+}
+
+impl ConvertDlg {
     pub fn fmt(&self) -> Format {
         let all = Format::writable();
         all[self.format.min(all.len() - 1)]
@@ -82,6 +110,12 @@ pub enum Dialog {
     Info(String),
     Shell { registered: bool },
     Favorites,
+    /// F2. `from`: full entry name (archive) or full path (folder view, `fs == true`);
+    /// `text`: the new last path component.
+    Rename { from: String, fs: bool, text: TextInputState },
+    /// Gray + (`select == true`) or Gray − mask dialog.
+    SelectMask { select: bool, text: TextInputState },
+    Convert(ConvertDlg),
 }
 
 impl Dialog {
@@ -95,6 +129,10 @@ impl Dialog {
             Dialog::Info(_) => "壓縮檔資訊",
             Dialog::Shell { .. } => "右鍵選單整合",
             Dialog::Favorites => "整理我的最愛",
+            Dialog::Rename { .. } => "重新命名",
+            Dialog::SelectMask { select: true, .. } => "選取群組",
+            Dialog::SelectMask { select: false, .. } => "取消選取群組",
+            Dialog::Convert(_) => "轉換壓縮檔",
         }
     }
     /// Text fields in Tab order.
@@ -105,6 +143,9 @@ impl Dialog {
             Dialog::Password(_) => vec![Field::Password],
             Dialog::Find(_) => vec![Field::Find],
             Dialog::Comment { .. } => vec![Field::Comment],
+            Dialog::Rename { .. } => vec![Field::Rename],
+            Dialog::SelectMask { .. } => vec![Field::Mask],
+            Dialog::Convert(d) if d.fmt().supports_password() => vec![Field::ConvertPassword],
             _ => vec![],
         }
     }
@@ -223,6 +264,14 @@ pub struct Model {
     pub list_view_h: f32,
     pub favorites: Vec<PathBuf>,
     pub scan_available: bool,
+    /// Overwrite policy of every extraction (Options menu, persisted).
+    pub overwrite: Overwrite,
+    /// Default of the create dialog's "test after archiving" checkbox (persisted).
+    pub test_after: bool,
+    /// Recently opened archives, newest first (File menu, persisted).
+    pub recent: Vec<PathBuf>,
+    /// Last mask of the select / deselect group dialog.
+    pub last_mask: String,
 }
 
 impl Model {
@@ -253,6 +302,10 @@ impl Model {
             list_view_h: 400.0,
             favorites: vec![],
             scan_available: false,
+            overwrite: Overwrite::Replace,
+            test_after: false,
+            recent: vec![],
+            last_mask: "*.*".to_string(),
         }
     }
 
@@ -381,6 +434,8 @@ impl Model {
             (Field::CreatePassword, Dialog::Create(d)) => Some(&mut d.password),
             (Field::CreateOutput, Dialog::Create(d)) => Some(&mut d.output),
             (Field::Password, Dialog::Password(t)) | (Field::Find, Dialog::Find(t)) | (Field::Comment, Dialog::Comment { text: t, .. }) => Some(t),
+            (Field::Rename, Dialog::Rename { text: t, .. }) | (Field::Mask, Dialog::SelectMask { text: t, .. }) => Some(t),
+            (Field::ConvertPassword, Dialog::Convert(d)) => Some(&mut d.password),
             _ => None,
         }
     }
@@ -391,6 +446,8 @@ impl Model {
             (Field::CreatePassword, Dialog::Create(d)) => Some(&d.password),
             (Field::CreateOutput, Dialog::Create(d)) => Some(&d.output),
             (Field::Password, Dialog::Password(t)) | (Field::Find, Dialog::Find(t)) | (Field::Comment, Dialog::Comment { text: t, .. }) => Some(t),
+            (Field::Rename, Dialog::Rename { text: t, .. }) | (Field::Mask, Dialog::SelectMask { text: t, .. }) => Some(t),
+            (Field::ConvertPassword, Dialog::Convert(d)) => Some(&d.password),
             _ => None,
         }
     }

@@ -5,7 +5,7 @@
 //! With `--json` every command prints exactly one JSON document on stdout.
 use std::path::PathBuf;
 
-use archiver_core::{BatchDest, BatchResult, CreateOptions, Error, Format, Progress};
+use archiver_core::{BatchDest, BatchResult, CreateOptions, Error, ExtractOptions, Format, Overwrite, Progress};
 use clap::{Parser, Subcommand};
 use serde_json::{Value, json};
 
@@ -42,6 +42,8 @@ enum Cmd {
         archive: PathBuf,
         #[arg(short, long, default_value = ".")] out: PathBuf,
         #[arg(short, long)] password: Option<String>,
+        /// Existing files: replace (default), skip, rename (name (2).ext) / 已存在的檔案
+        #[arg(long, default_value = "replace", value_parser = parse_overwrite)] overwrite: Overwrite,
         entries: Vec<String>,
     },
     /// Create archive; format is taken from the output extension / 建立壓縮檔
@@ -82,6 +84,31 @@ enum Cmd {
         /// Folder that receives the <stem>/ folders (default: beside each archive)
         #[arg(short, long)] out: Option<PathBuf>,
         #[arg(short, long)] password: Option<String>,
+        /// Existing files: replace (default), skip, rename
+        #[arg(long, default_value = "replace", value_parser = parse_overwrite)] overwrite: Overwrite,
+    },
+    /// Rename an entry or folder inside an archive (ZIP, 7z, tar.*) / 重新命名
+    Rn {
+        archive: PathBuf,
+        /// Full entry name, e.g. docs/a.txt or docs
+        from: String,
+        /// New full entry name, e.g. docs/b.txt
+        to: String,
+        /// Needed for encrypted 7z (rewritten)
+        #[arg(short, long)] password: Option<String>,
+    },
+    /// Convert an archive to another format; format from the output extension / 轉換壓縮檔
+    Cv {
+        input: PathBuf,
+        /// Output archive (default: beside the input, in --format or .zip)
+        output: Option<PathBuf>,
+        /// Output format when no output path is given (zip, 7z, tar.gz, …)
+        #[arg(short, long, value_parser = parse_format)] format: Option<Format>,
+        #[arg(short, long)] level: Option<u32>,
+        /// Password of the new archive
+        #[arg(short, long)] password: Option<String>,
+        /// Password of the input archive
+        #[arg(long)] src_password: Option<String>,
     },
 }
 
@@ -104,6 +131,10 @@ fn parse_format(s: &str) -> Result<Format, String> {
         let accepted: Vec<&str> = formats.iter().map(|f| f.extension()).collect();
         format!("unknown format '{s}' (accepted: {})", accepted.join(", "))
     })
+}
+
+fn parse_overwrite(s: &str) -> Result<Overwrite, String> {
+    Overwrite::from_key(s).ok_or_else(|| format!("unknown overwrite mode '{s}' (accepted: replace, skip, rename)"))
 }
 
 /// The archive needs a password, or the one given is wrong (any format's wording).
@@ -205,11 +236,29 @@ fn run(cli: Cli) -> Result<(), Error> {
                 println!("OK   {} ({n} files tested)", archive.display());
             }
         }
-        Cmd::X { archive, out, password, entries } => {
+        Cmd::X { archive, out, password, overwrite, entries } => {
             let sel = (!entries.is_empty()).then_some(entries);
-            archiver_core::extract(&archive, &out, password.as_deref(), sel.as_deref(), &p)?;
+            let st = archiver_core::extract_with(&archive, &out, password.as_deref(), sel.as_deref(), &ExtractOptions { overwrite }, &p)?;
             if j {
-                print_json(&json!({"ok": true, "archive": path_str(&archive), "out": path_str(&out)}));
+                print_json(&json!({"ok": true, "archive": path_str(&archive), "out": path_str(&out), "skipped": st.skipped, "renamed": st.renamed}));
+            } else if st.skipped + st.renamed > 0 {
+                println!("OK   {} -> {} (skipped {}, renamed {})", archive.display(), out.display(), st.skipped, st.renamed);
+            }
+        }
+        Cmd::Rn { archive, from, to, password } => {
+            archiver_core::rename(&archive, &from, &to, password.as_deref(), &p)?;
+            if j {
+                print_json(&json!({"ok": true, "archive": path_str(&archive), "from": from, "to": to}));
+            }
+        }
+        Cmd::Cv { input, output, format, level, password, src_password } => {
+            let output = output.unwrap_or_else(|| archiver_core::convert_output(&input, format.unwrap_or(Format::Zip)));
+            let format = Format::detect(&output).ok_or_else(|| Error::Unsupported(output.display().to_string()))?;
+            archiver_core::convert(&input, &output, &CreateOptions { format, level, password }, src_password.as_deref(), &p)?;
+            if j {
+                print_json(&json!({"ok": true, "input": path_str(&input), "output": path_str(&output)}));
+            } else {
+                println!("OK   {} -> {}", input.display(), output.display());
             }
         }
         Cmd::C { output, inputs, level, password } => {
@@ -245,9 +294,9 @@ fn run(cli: Cli) -> Result<(), Error> {
             let rs = archiver_core::create_each(&inputs, out.as_deref(), &CreateOptions { format, level, password }, &p);
             finish_batch(j, &rs);
         }
-        Cmd::Xe { archives, out, password } => {
+        Cmd::Xe { archives, out, password, overwrite } => {
             let dest = out.map_or(BatchDest::BesideInFolder, BatchDest::IntoFolders);
-            let rs = archiver_core::extract_each(&archives, &dest, password.as_deref(), &p);
+            let rs = archiver_core::extract_each_with(&archives, &dest, password.as_deref(), &ExtractOptions { overwrite }, &p);
             finish_batch(j, &rs);
         }
     }

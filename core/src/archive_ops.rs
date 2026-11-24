@@ -346,16 +346,18 @@ pub fn delete(archive: &Path, names: &[String], password: Option<&str>, p: &Prog
     if !fmt.can_create() || fmt.is_single_file() {
         return Err(Error::Unsupported(format!("cannot delete entries from {}", fmt.label())));
     }
-    let tmp = {
-        let mut n = archive.as_os_str().to_owned();
-        n.push(".rewrite.tmp");
-        PathBuf::from(n)
-    };
+    if fmt == Format::Zip {
+        reject_zipcrypto(&mut zip::ZipArchive::new(BufReader::new(File::open(archive)?))?)?;
+    }
+    let tmp = unique_tmp(archive, "rewrite")?;
     let hit = |name: &str| wanted(Some(names), name);
     let res = (|| -> Result<()> {
         if fmt == Format::Zip {
             let mut src = zip::ZipArchive::new(BufReader::with_capacity(256 << 10, File::open(archive)?))?;
             let mut out = zip::ZipWriter::new(wr(File::create(&tmp)?));
+            if !src.comment().is_empty() {
+                out.set_raw_comment(src.comment().to_vec().into_boxed_slice())?;
+            }
             for i in 0..src.len() {
                 p.check()?;
                 let f = src.by_index_raw(i)?;
@@ -407,6 +409,50 @@ pub fn delete(archive: &Path, names: &[String], password: Option<&str>, p: &Prog
     }
 }
 
+/// Error text for archives whose entries use traditional PKWARE (ZipCrypto) encryption.
+pub(crate) const ZIPCRYPTO_UNSUPPORTED: &str = "archive has ZipCrypto (legacy) encrypted entries; modifying it would corrupt them — convert it first";
+
+/// Whether any entry is encrypted with ZipCrypto (encrypted flag set, no AES extra field).
+/// zip 9's raw copies (`raw_copy_file*`, built on `ZipFile::options()`) keep AES metadata but drop
+/// general-purpose flag bit 0 for ZipCrypto, writing ciphertext marked as plain data, so such
+/// archives must not be rewritten entry by entry.
+pub(crate) fn has_zipcrypto<R: Read + io::Seek>(z: &mut zip::ZipArchive<R>) -> Result<bool> {
+    for i in 0..z.len() {
+        let f = z.by_index_raw(i)?;
+        if f.encrypted() && !f.extra_data_fields().any(|x| matches!(x, zip::ExtraField::AeXEncryption(_))) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// `Error::Unsupported` when [`has_zipcrypto`]; call it before writing anything.
+pub(crate) fn reject_zipcrypto<R: Read + io::Seek>(z: &mut zip::ZipArchive<R>) -> Result<()> {
+    if has_zipcrypto(z)? {
+        return Err(Error::Unsupported(ZIPCRYPTO_UNSUPPORTED.into()));
+    }
+    Ok(())
+}
+
+/// Reserve a new, empty temp file next to `target` (`<target>.<pid>-<nanos>-<n>.<tag>.tmp`).
+/// It is created with `create_new`, so it never clobbers an existing file or another process's
+/// temp file. The caller removes it (or renames it over `target`) on every path.
+pub(crate) fn unique_tmp(target: &Path, tag: &str) -> Result<PathBuf> {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    for _ in 0..1000 {
+        let mut n = target.as_os_str().to_owned();
+        n.push(format!(".{}-{nanos}-{}.{tag}.tmp", std::process::id(), SEQ.fetch_add(1, Ordering::Relaxed)));
+        let path = PathBuf::from(n);
+        match fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(_) => return Ok(path),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Err(Error::Io(io::Error::other("cannot create temp file")))
+}
+
 pub(super) fn tempdir_near(archive: &Path) -> Result<PathBuf> {
     // next to the archive: same volume, and no need for free space in %TEMP%
     let base = match archive.parent() {
@@ -429,5 +475,151 @@ impl<R: Read> Read for CountingReader<R> {
         let n = self.inner.read(b)?;
         self.count.fetch_add(n as u64, Ordering::Relaxed);
         Ok(n)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zip_delete_keeps_comment() {
+        let t = tempfile::tempdir().unwrap();
+        let s = t.path().join("in");
+        fs::create_dir_all(&s).unwrap();
+        fs::write(s.join("a.txt"), "a").unwrap();
+        fs::write(s.join("b.txt"), "b").unwrap();
+        let z = t.path().join("c.zip");
+        create(&z, &[s], &CreateOptions { format: Format::Zip, level: None, password: None }, &Progress::none()).unwrap();
+        set_comment(&z, "備註 comment", &Progress::none()).unwrap();
+        delete(&z, &["in/a.txt".to_string()], None, &Progress::none()).unwrap();
+        assert_eq!(read_comment(&z).unwrap().as_deref(), Some("備註 comment"));
+        let names: Vec<String> = list(&z, None).unwrap().into_iter().map(|e| e.name).collect();
+        assert!(names.iter().any(|n| n == "in/b.txt") && !names.iter().any(|n| n == "in/a.txt"), "{names:?}");
+    }
+
+    /// Two stored entries (a.txt "secret alpha", b.txt "secret beta") with traditional PKWARE
+    /// (ZipCrypto) encryption, password "pw"; built by hand because zip 9 cannot write ZipCrypto.
+    const ZIPCRYPTO: &[u8] = b"\x50\x4b\x03\x04\x14\x00\x01\x00\x00\x00\x00\x00\x21\x00\x97\x6a\x45\x7c\x18\x00\x00\x00\x0c\x00\x00\x00\x05\x00\x00\x00\
+        \x61\x2e\x74\x78\x74\x55\x99\xfe\x11\x5a\x1b\x30\x5c\xd2\x18\x48\x5e\xc0\xc8\xf2\xb2\x84\x58\xb6\x23\x70\xc8\x65\xce\x50\
+        \x4b\x03\x04\x14\x00\x01\x00\x00\x00\x00\x00\x21\x00\x48\xb9\x3b\x96\x17\x00\x00\x00\x0b\x00\x00\x00\x05\x00\x00\x00\x62\
+        \x2e\x74\x78\x74\xe2\xb5\xa3\x15\xb9\x39\xfe\x5a\xa6\x9e\xf8\xcf\x17\xaa\xe8\x54\xaf\x27\x25\xbe\xcd\x2a\x79\x50\x4b\x01\
+        \x02\x14\x00\x14\x00\x01\x00\x00\x00\x00\x00\x21\x00\x97\x6a\x45\x7c\x18\x00\x00\x00\x0c\x00\x00\x00\x05\x00\x00\x00\x00\
+        \x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x61\x2e\x74\x78\x74\x50\x4b\x01\x02\x14\x00\x14\x00\x01\x00\x00\x00\
+        \x00\x00\x21\x00\x48\xb9\x3b\x96\x17\x00\x00\x00\x0b\x00\x00\x00\x05\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\
+        \x3b\x00\x00\x00\x62\x2e\x74\x78\x74\x50\x4b\x05\x06\x00\x00\x00\x00\x02\x00\x02\x00\x66\x00\x00\x00\x75\x00\x00\x00\x00\
+        \x00";
+
+    fn zc_fixture(dir: &Path) -> PathBuf {
+        let z = dir.join("zc.zip");
+        fs::write(&z, ZIPCRYPTO).unwrap();
+        z
+    }
+
+    fn zc_read(z: &Path, dir: &Path, name: &str) -> String {
+        let out = dir.join(format!("out-{}", SEQ_T.fetch_add(1, Ordering::Relaxed)));
+        extract(z, &out, Some("pw"), None, &Progress::none()).unwrap();
+        fs::read_to_string(out.join(name)).unwrap()
+    }
+    static SEQ_T: AtomicU64 = AtomicU64::new(0);
+
+    fn leftovers(dir: &Path) -> Vec<String> {
+        fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().to_string()).filter(|n| n.starts_with(".archiver") || n.ends_with(".tmp")).collect()
+    }
+
+    #[test]
+    fn zipcrypto_fixture_detected_and_readable() {
+        let t = tempfile::tempdir().unwrap();
+        let z = zc_fixture(t.path());
+        assert!(has_zipcrypto(&mut zip::ZipArchive::new(File::open(&z).unwrap()).unwrap()).unwrap());
+        assert_eq!(zc_read(&z, t.path(), "a.txt"), "secret alpha");
+        assert_eq!(zc_read(&z, t.path(), "b.txt"), "secret beta");
+        // AES archives are not ZipCrypto
+        let s = t.path().join("in");
+        fs::create_dir_all(&s).unwrap();
+        fs::write(s.join("x.txt"), "x").unwrap();
+        let aes = t.path().join("aes.zip");
+        create(&aes, &[s], &CreateOptions { format: Format::Zip, level: None, password: Some("pw".into()) }, &Progress::none()).unwrap();
+        assert!(!has_zipcrypto(&mut zip::ZipArchive::new(File::open(&aes).unwrap()).unwrap()).unwrap());
+    }
+
+    #[test]
+    fn zipcrypto_rewrites_refused_and_archive_untouched() {
+        let t = tempfile::tempdir().unwrap();
+        let z = zc_fixture(t.path());
+        let refused = |r: Result<()>, what: &str| match r {
+            Err(Error::Unsupported(m)) => {
+                assert!(m.contains("ZipCrypto"), "{what}: {m}");
+                assert!(!m.to_lowercase().contains("password"), "{what}: {m}");
+            }
+            r => panic!("{what}: {r:?}"),
+        };
+        refused(delete(&z, &["a.txt".to_string()], Some("pw"), &Progress::none()), "delete");
+        refused(delete(&z, &["a.txt".to_string()], None, &Progress::none()), "delete without password");
+        refused(crate::rename(&z, "a.txt", "c.txt", Some("pw"), &Progress::none()), "rename");
+        refused(crate::rename(&z, "a.txt", "c.txt", None, &Progress::none()), "rename without password");
+        // adding a file that would replace an existing entry needs a rewrite too
+        let s = t.path().join("in");
+        fs::create_dir_all(&s).unwrap();
+        fs::write(s.join("a.txt"), "replacement").unwrap();
+        refused(add(&z, &[s.join("a.txt")], "", &CreateOptions { format: Format::Zip, level: None, password: None }, &Progress::none()), "add");
+        assert_eq!(fs::read(&z).unwrap(), ZIPCRYPTO);
+        assert!(leftovers(t.path()).is_empty(), "{:?}", leftovers(t.path()));
+        assert_eq!(zc_read(&z, t.path(), "a.txt"), "secret alpha");
+        assert_eq!(zc_read(&z, t.path(), "b.txt"), "secret beta");
+    }
+
+    #[test]
+    fn zipcrypto_add_appends_and_keeps_entries() {
+        let t = tempfile::tempdir().unwrap();
+        let z = zc_fixture(t.path());
+        set_comment(&z, "note", &Progress::none()).unwrap();
+        let s = t.path().join("in");
+        fs::create_dir_all(s.join("sub")).unwrap();
+        fs::write(s.join("sub/c.txt"), "plain gamma").unwrap();
+        add(&z, &[s.join("sub")], "dir", &CreateOptions { format: Format::Zip, level: None, password: None }, &Progress::none()).unwrap();
+        // the original local entries are byte-for-byte where they were
+        assert_eq!(fs::read(&z).unwrap()[..0x66], ZIPCRYPTO[..0x66]);
+        assert_eq!(zc_read(&z, t.path(), "a.txt"), "secret alpha");
+        assert_eq!(zc_read(&z, t.path(), "b.txt"), "secret beta");
+        assert_eq!(zc_read(&z, t.path(), "dir/sub/c.txt"), "plain gamma");
+        assert_eq!(read_comment(&z).unwrap().as_deref(), Some("note"));
+        assert!(has_zipcrypto(&mut zip::ZipArchive::new(File::open(&z).unwrap()).unwrap()).unwrap());
+        // adding an existing folder again keeps it and adds the new file below it
+        fs::write(s.join("sub/d.txt"), "delta").unwrap();
+        add(&z, &[s.join("sub/d.txt")], "dir/sub", &CreateOptions { format: Format::Zip, level: None, password: None }, &Progress::none()).unwrap();
+        assert_eq!(zc_read(&z, t.path(), "dir/sub/d.txt"), "delta");
+        assert_eq!(zc_read(&z, t.path(), "a.txt"), "secret alpha");
+        assert!(leftovers(t.path()).is_empty(), "{:?}", leftovers(t.path()));
+    }
+
+    #[test]
+    fn unique_tmp_never_reuses_a_name() {
+        let t = tempfile::tempdir().unwrap();
+        let target = t.path().join("a.zip");
+        let a = unique_tmp(&target, "x").unwrap();
+        let b = unique_tmp(&target, "x").unwrap();
+        assert_ne!(a, b);
+        assert!(a.exists() && b.exists());
+        assert!(a.to_string_lossy().ends_with(".x.tmp"));
+    }
+
+    #[test]
+    fn delete_does_not_clobber_user_file() {
+        let t = tempfile::tempdir().unwrap();
+        let s = t.path().join("in");
+        fs::create_dir_all(&s).unwrap();
+        fs::write(s.join("a.txt"), "a").unwrap();
+        fs::write(s.join("b.txt"), "b").unwrap();
+        for ext in ["zip", "tar"] {
+            let z = t.path().join(format!("c.{ext}"));
+            create(&z, std::slice::from_ref(&s), &CreateOptions { format: Format::detect(&z).unwrap(), level: None, password: None }, &Progress::none()).unwrap();
+            let mine = t.path().join(format!("c.{ext}.rewrite.tmp"));
+            fs::write(&mine, "user data").unwrap();
+            delete(&z, &["in/a.txt".to_string()], None, &Progress::none()).unwrap();
+            assert_eq!(fs::read_to_string(&mine).unwrap(), "user data");
+            fs::remove_file(&mine).unwrap();
+        }
+        assert!(leftovers(t.path()).is_empty(), "{:?}", leftovers(t.path()));
     }
 }

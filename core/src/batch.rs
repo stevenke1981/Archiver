@@ -8,7 +8,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 
-use super::{CreateOptions, Error, Format, Progress, Result};
+use super::{CreateOptions, Error, ExtractOptions, Format, Progress, Result};
 
 const U: u64 = 1 << 20;
 
@@ -89,6 +89,11 @@ pub fn create_each(inputs: &[PathBuf], out_dir: Option<&Path>, opts: &CreateOpti
 /// folder within the batch (`a.zip` + `a.7z`, `x/data.zip` + `y/data.zip` into one folder) get
 /// "<stem> (2)", "<stem> (3)", … instead of overwriting each other.
 pub fn extract_each(archives: &[PathBuf], dest: &BatchDest, password: Option<&str>, p: &Progress) -> Vec<BatchResult> {
+    extract_each_opts(archives, dest, password, &ExtractOptions::default(), p)
+}
+
+/// [`extract_each`] with an overwrite policy (shared by [`super::extract_each_with`]).
+pub(crate) fn extract_each_opts(archives: &[PathBuf], dest: &BatchDest, password: Option<&str>, opts: &ExtractOptions, p: &Progress) -> Vec<BatchResult> {
     let n = archives.len();
     let mut stop = false;
     let mut taken = HashSet::new();
@@ -111,7 +116,7 @@ pub fn extract_each(archives: &[PathBuf], dest: &BatchDest, password: Option<&st
             let result = if stop || cancelled(p) {
                 Err(Error::Cancelled)
             } else {
-                item(p, k, n, &name_of(archive), |ip| super::extract(archive, &output, password, None, ip))
+                item(p, k, n, &name_of(archive), |ip| super::extract_with(archive, &output, password, None, opts, ip).map(|_| ()))
             };
             stop |= matches!(result, Err(Error::Cancelled));
             BatchResult { input: archive.clone(), output, result }

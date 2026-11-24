@@ -12,10 +12,11 @@ use super::effects::Effects;
 use super::menus::MENU_KEYS;
 use super::model::*;
 use super::msg::*;
+use super::winrar::{self, AfterCreate};
 use crate::view::{self, Item};
 
 pub const BUSY_MSG: &str = "目前有工作正在進行，請稍候…";
-const PREVIEW_PW_MSG: &str = "此檔案已加密，請先輸入壓縮檔密碼（檔案 → 壓縮檔密碼…）";
+const PREVIEW_PW_MSG: &str = "此檔案已加密，請先輸入壓縮檔密碼（檔案 → 設定預設密碼…）";
 pub const PREVIEW_DEBOUNCE: Duration = Duration::from_millis(120);
 /// Image keys of preview images (icons use small keys).
 const PREVIEW_IMAGE_KEY: u64 = 1 << 40;
@@ -146,7 +147,7 @@ pub fn set_status(m: &mut Model, msg: impl Into<String>) {
 }
 
 /// True (and a status hint) while a background job runs.
-fn is_busy(m: &mut Model) -> bool {
+pub(super) fn is_busy(m: &mut Model) -> bool {
     if m.job.is_some() {
         set_status(m, BUSY_MSG);
         return true;
@@ -253,6 +254,39 @@ fn key(m: &mut Model, fx: &mut dyn Effects, k: KeyPress) {
         m.popup = Some(Popup::Menu(i));
         return;
     }
+    if k.alt && !k.ctrl {
+        let c = match (&k.key, k.shortcut().as_deref()) {
+            (PlatformKey::Enter, _) | (_, Some("i")) => Some(Cmd::Info),
+            (_, Some("a")) => Some(Cmd::Add),
+            (_, Some("e")) => Some(Cmd::Extract),
+            (_, Some("w")) => Some(Cmd::ExtractHere),
+            (_, Some("t")) => Some(Cmd::Test),
+            (_, Some("v")) => Some(Cmd::View),
+            (_, Some("m")) => Some(Cmd::Comment),
+            (_, Some("q")) => Some(Cmd::Convert),
+            (_, Some("g")) => Some(Cmd::Report),
+            (_, Some("z")) => Some(Cmd::Wizard),
+            _ => None,
+        };
+        if let Some(c) = c {
+            command(m, fx, c);
+        }
+        return;
+    }
+    if k.ctrl && k.key == PlatformKey::PageUp {
+        return go_up(m, fx);
+    }
+    if !k.ctrl {
+        let c = match k.shortcut().as_deref() {
+            Some("+") => Some(Cmd::SelectGroup),
+            Some("-") => Some(Cmd::DeselectGroup),
+            Some("*") => Some(Cmd::InvertSelection),
+            _ => None,
+        };
+        if let Some(c) = c {
+            return command(m, fx, c);
+        }
+    }
     match k.key {
         PlatformKey::Enter => {
             if let Some(i) = m.anchor.filter(|&a| m.selected.get(a) == Some(&true)).or_else(|| m.selected.iter().position(|&x| x)) {
@@ -271,6 +305,7 @@ fn key(m: &mut Model, fx: &mut dyn Effects, k: KeyPress) {
         PlatformKey::PageDown => move_selection(m, fx, m.page_rows() as i64),
         PlatformKey::Home => move_selection(m, fx, -(m.items.len() as i64)),
         PlatformKey::End => move_selection(m, fx, m.items.len() as i64),
+        PlatformKey::Function(2) => command(m, fx, Cmd::Rename),
         PlatformKey::Function(3) => command(m, fx, Cmd::View),
         PlatformKey::Function(5) => command(m, fx, Cmd::Refresh),
         PlatformKey::Escape => {
@@ -286,6 +321,7 @@ fn key(m: &mut Model, fx: &mut dyn Effects, k: KeyPress) {
             Some("c") => command(m, fx, Cmd::Copy),
             Some("f") => command(m, fx, Cmd::Find),
             Some("o") => command(m, fx, Cmd::Open),
+            Some("p") => command(m, fx, Cmd::Password),
             _ => {}
         },
         _ => {}
@@ -375,7 +411,7 @@ fn dialog_key(m: &mut Model, fx: &mut dyn Effects, k: KeyPress) {
     }
 }
 
-fn set_focus(m: &mut Model, f: Option<Field>) {
+pub(super) fn set_focus(m: &mut Model, f: Option<Field>) {
     if let Some(old) = m.focus
         && let Some(i) = m.input_mut(old)
     {
@@ -389,7 +425,7 @@ fn set_focus(m: &mut Model, f: Option<Field>) {
     }
 }
 
-fn open_dialog(m: &mut Model, d: Dialog) {
+pub(super) fn open_dialog(m: &mut Model, d: Dialog) {
     let first = d.fields().first().copied();
     m.popup = None;
     m.dialog = Some(d);
@@ -397,7 +433,7 @@ fn open_dialog(m: &mut Model, d: Dialog) {
     set_focus(m, first);
 }
 
-fn close_dialog(m: &mut Model) {
+pub(super) fn close_dialog(m: &mut Model) {
     if matches!(m.dialog, Some(Dialog::Create(_))) {
         m.create_inputs.clear();
     }
@@ -503,11 +539,13 @@ pub fn command(m: &mut Model, fx: &mut dyn Effects, c: Cmd) {
         }
         Cmd::TogglePreview => {
             m.preview_visible = !m.preview_visible;
+            winrar::save_settings(m, fx);
             selection_changed(m, fx);
         }
         Cmd::ShowPreview => {
             if !m.preview_visible {
                 m.preview_visible = true;
+                winrar::save_settings(m, fx);
                 selection_changed(m, fx);
             }
         }
@@ -535,6 +573,15 @@ pub fn command(m: &mut Model, fx: &mut dyn Effects, c: Cmd) {
                 open_location(m, fx, p);
             }
         }
+        Cmd::Rename => winrar::open_rename(m, fx),
+        Cmd::SelectGroup => winrar::open_mask(m, true),
+        Cmd::DeselectGroup => winrar::open_mask(m, false),
+        Cmd::InvertSelection => winrar::invert_selection(m, fx),
+        Cmd::Convert => winrar::open_convert(m, fx),
+        Cmd::Report => winrar::do_report(m, fx),
+        Cmd::SaveCopy => winrar::do_save_copy(m, fx),
+        Cmd::RecentOpen(i) => winrar::recent_open(m, fx, i),
+        Cmd::SetOverwrite(o) => winrar::set_overwrite(m, fx, o),
     }
 }
 
@@ -577,7 +624,8 @@ fn reload_archive(m: &mut Model, fx: &mut dyn Effects, path: PathBuf) {
     // listing can take long (.tar.gz is read in full): in the background
     let pw = m.opt_pw();
     spawn(m, fx, "讀取中…", move |_| {
-        let r = archiver_core::list(&path, pw.as_deref()).map_err(|e| e.to_string());
+        // the existence check can hang on an offline network drive: it runs here, not in update()
+        let r = if path.is_file() { archiver_core::list(&path, pw.as_deref()).map_err(|e| e.to_string()) } else { Err(winrar::NOT_FOUND.to_string()) };
         Msg::Listed(path, r)
     });
 }
@@ -605,7 +653,19 @@ pub fn show_listing(m: &mut Model, fx: &mut dyn Effects, path: PathBuf, entries:
 fn listed(m: &mut Model, fx: &mut dyn Effects, path: PathBuf, r: Result<Vec<archiver_core::Entry>, String>) {
     m.job = None;
     match r {
-        Ok(entries) => show_listing(m, fx, path, entries),
+        Ok(entries) => {
+            let reopened = matches!(&m.mode, Mode::Archive { path: p, .. } if *p == path);
+            show_listing(m, fx, path.clone(), entries);
+            if !reopened {
+                winrar::remember_recent(m, fx, &path);
+            }
+        }
+        Err(e) if e == winrar::NOT_FOUND => {
+            set_status(m, format!("找不到 {}", path.display()));
+            if !winrar::forget_missing_recent(m, fx, &path) {
+                fx.error(&format!("找不到 {}", path.display()));
+            }
+        }
         Err(e) => {
             set_status(m, format!("無法開啟 {}: {e}", path.display()));
             if is_password_err(&e) {
@@ -745,12 +805,13 @@ fn do_extract(m: &mut Model, fx: &mut dyn Effects, scope: ExtractScope) {
 }
 
 pub fn extract_into(m: &mut Model, fx: &mut dyn Effects, sources: Vec<PathBuf>, sel: Option<Vec<String>>, pw: Option<String>, dest: PathBuf) {
+    let opts = winrar::extract_options(m);
     if sources.len() > 1 {
         let dest = BatchDest::IntoFolders(dest);
-        return spawn(m, fx, "解壓縮中…", move |p| batch_msg(&archiver_core::extract_each(&sources, &dest, pw.as_deref(), p)));
+        return spawn(m, fx, "解壓縮中…", move |p| batch_msg(&archiver_core::extract_each_with(&sources, &dest, pw.as_deref(), &opts, p)));
     }
-    spawn(m, fx, "解壓縮中…", move |p| match archiver_core::extract(&sources[0], &dest, pw.as_deref(), sel.as_deref(), p) {
-        Ok(()) => Msg::JobDone(Ok(format!("已解壓縮到 {}", dest.display())), After::ReloadFs),
+    spawn(m, fx, "解壓縮中…", move |p| match archiver_core::extract_with(&sources[0], &dest, pw.as_deref(), sel.as_deref(), &opts, p) {
+        Ok(stats) => Msg::JobDone(Ok(winrar::extracted_text(&dest, stats)), After::ReloadFs),
         Err(e) => Msg::JobDone(Err(format!("{}: {e}", sources[0].display())), After::Nothing),
     });
 }
@@ -764,15 +825,16 @@ fn do_extract_each(m: &mut Model, fx: &mut dyn Effects, dest: BatchDest) {
     if arcs.is_empty() {
         return set_status(m, "請先開啟或選取壓縮檔");
     }
-    let pw = m.opt_pw();
-    spawn(m, fx, "解壓縮中…", move |p| batch_msg(&archiver_core::extract_each(&arcs, &dest, pw.as_deref(), p)));
+    let (pw, opts) = (m.opt_pw(), winrar::extract_options(m));
+    spawn(m, fx, "解壓縮中…", move |p| batch_msg(&archiver_core::extract_each_with(&arcs, &dest, pw.as_deref(), &opts, p)));
 }
 
 /// Context-menu "extract here / to folder" from the command line.
 pub fn extract_batch(m: &mut Model, fx: &mut dyn Effects, files: Vec<PathBuf>, to_folder: bool) {
     m.close_when_done = true;
     let dest = if to_folder { BatchDest::BesideInFolder } else { BatchDest::Beside };
-    spawn(m, fx, "解壓縮中…", move |p| batch_msg(&archiver_core::extract_each(&files, &dest, None, p)));
+    let opts = winrar::extract_options(m);
+    spawn(m, fx, "解壓縮中…", move |p| batch_msg(&archiver_core::extract_each_with(&files, &dest, None, &opts, p)));
 }
 
 /// Shell command: choose a destination; one archive goes directly into it.
@@ -817,7 +879,7 @@ pub fn is_cancel_err(e: &str) -> bool {
 
 /// Password for rewriting the open archive (add / delete): only when it is encrypted,
 /// so a plain archive is never re-created encrypted. None = asked for one first.
-fn rewrite_password(m: &mut Model) -> Option<Option<String>> {
+pub(super) fn rewrite_password(m: &mut Model) -> Option<Option<String>> {
     let Mode::Archive { entries, .. } = &m.mode else { return Some(None) };
     if !entries.iter().any(|e| e.encrypted) {
         return Some(None);
@@ -977,6 +1039,8 @@ pub fn open_create(m: &mut Model, files: Vec<PathBuf>, each: Option<bool>) {
                 each: each.unwrap_or(false),
                 password: text_input("", true),
                 output: text_input("", false),
+                test_after: m.test_after,
+                delete_after: false,
             };
             open_dialog(m, Dialog::Create(d));
             set_focus(m, Some(Field::CreateOutput));
@@ -999,7 +1063,10 @@ pub fn update_create_fields(m: &mut Model) {
     }
 }
 
-fn apply_format(m: &mut Model, idx: usize) {
+fn apply_format(m: &mut Model, fx: &mut dyn Effects, idx: usize) {
+    if matches!(m.dialog, Some(Dialog::Convert(_))) {
+        return winrar::convert_set_format(m, idx);
+    }
     let Some(Dialog::Create(d)) = &mut m.dialog else { return };
     d.format = idx.min(Format::writable().len() - 1);
     m.last_format = d.format;
@@ -1013,6 +1080,7 @@ fn apply_format(m: &mut Model, idx: usize) {
         set_focus(m, Some(Field::CreateOutput));
     }
     update_create_fields(m);
+    winrar::save_settings(m, fx);
 }
 
 fn start_create(m: &mut Model, fx: &mut dyn Effects) {
@@ -1022,6 +1090,7 @@ fn start_create(m: &mut Model, fx: &mut dyn Effects) {
     let each = d.each;
     let pw = d.password.text.clone();
     let level = fmt.level_range().map(|_| d.level);
+    let post = AfterCreate { test: d.test_after, delete: d.delete_after };
     let inputs = m.create_inputs.clone();
     if inputs.is_empty() || output.as_os_str().is_empty() || is_busy(m) {
         return;
@@ -1029,21 +1098,16 @@ fn start_create(m: &mut Model, fx: &mut dyn Effects) {
     if !each && output.exists() && !fx.confirm("覆寫檔案？", &format!("{} 已存在，要覆寫嗎？", output.display())) {
         return;
     }
+    if post.delete && !fx.confirm("刪除原始檔案", &format!("壓縮完成後將永久刪除 {} 個原始檔案或資料夾（不會移到資源回收筒）。確定嗎？", inputs.len())) {
+        return;
+    }
     let opts = CreateOptions { format: fmt, level, password: Some(pw).filter(|p| !p.is_empty() && fmt.supports_password()) };
     close_dialog(m);
     if each {
         // output is a folder; core picks a unique archive name per input
-        return spawn(m, fx, "分批壓縮中…", move |p| {
-            if let Err(e) = std::fs::create_dir_all(&output) {
-                return Msg::JobDone(Err(format!("{}: {e}", output.display())), After::Nothing);
-            }
-            batch_msg(&archiver_core::create_each(&inputs, Some(&output), &opts, p))
-        });
+        return spawn(m, fx, "分批壓縮中…", move |p| winrar::create_each_msg(&inputs, &output, &opts, post, p));
     }
-    spawn(m, fx, "壓縮中…", move |p| {
-        let r = archiver_core::create(&output, &inputs, &opts, p).map(|_| format!("已建立 {}", output.display())).map_err(|e| e.to_string());
-        Msg::JobDone(r, After::ReloadFs)
-    });
+    spawn(m, fx, "壓縮中…", move |p| winrar::create_one_msg(&output, &inputs, &opts, post, p));
 }
 
 fn dialog_msg(m: &mut Model, fx: &mut dyn Effects, d: DlgMsg) {
@@ -1073,6 +1137,9 @@ fn dialog_msg(m: &mut Model, fx: &mut dyn Effects, d: DlgMsg) {
                 refresh(m, fx);
             }
             Some(Dialog::Comment { .. }) => save_comment(m, fx),
+            Some(Dialog::Rename { .. }) => winrar::apply_rename(m, fx),
+            Some(Dialog::SelectMask { .. }) => winrar::apply_mask(m, fx),
+            Some(Dialog::Convert(_)) => winrar::start_convert(m, fx),
             _ => close_dialog(m),
         },
         DlgMsg::Cancel => close_dialog(m),
@@ -1088,19 +1155,19 @@ fn dialog_msg(m: &mut Model, fx: &mut dyn Effects, d: DlgMsg) {
         DlgMsg::OpenFormats { x, y, w } => {
             m.popup = if matches!(m.popup, Some(Popup::Formats { .. })) { None } else { Some(Popup::Formats { x, y, w }) };
         }
-        DlgMsg::SetFormat(i) => apply_format(m, i),
+        DlgMsg::SetFormat(i) => apply_format(m, fx, i),
         DlgMsg::SetLevel(v) => {
-            if let Some(Dialog::Create(d)) = &mut m.dialog
-                && let Some((lo, hi, _)) = d.fmt().level_range()
+            if let Some((level, fmt)) = winrar::dialog_level_mut(m)
+                && let Some((lo, hi, _)) = fmt.level_range()
             {
-                d.level = v.clamp(lo, hi);
+                *level = v.clamp(lo, hi);
             }
         }
         DlgMsg::LevelStep(s) => {
-            if let Some(Dialog::Create(d)) = &mut m.dialog
-                && let Some((lo, hi, _)) = d.fmt().level_range()
+            if let Some((level, fmt)) = winrar::dialog_level_mut(m)
+                && let Some((lo, hi, _)) = fmt.level_range()
             {
-                d.level = (d.level as i64 + s as i64).clamp(lo as i64, hi as i64) as u32;
+                *level = (*level as i64 + s as i64).clamp(lo as i64, hi as i64) as u32;
             }
         }
         DlgMsg::ToggleEach => {
@@ -1149,6 +1216,18 @@ fn dialog_msg(m: &mut Model, fx: &mut dyn Effects, d: DlgMsg) {
                     fx.error(&format!("無法移除：{e}"));
                 }
                 m.favorites = fx.favorites_load();
+            }
+        }
+        DlgMsg::ToggleTestAfter => {
+            if let Some(Dialog::Create(d)) = &mut m.dialog {
+                d.test_after = !d.test_after;
+                m.test_after = d.test_after;
+                winrar::save_settings(m, fx);
+            }
+        }
+        DlgMsg::ToggleDeleteAfter => {
+            if let Some(Dialog::Create(d)) = &mut m.dialog {
+                d.delete_after = !d.delete_after;
             }
         }
     }

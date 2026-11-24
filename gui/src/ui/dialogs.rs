@@ -10,6 +10,8 @@ const PAD: f32 = 22.0;
 const ROW: f32 = 34.0;
 const GAP: f32 = 10.0;
 const LABEL_W: f32 = 92.0;
+/// Three stacked 28 px checkboxes (4 px apart) plus the gap below them.
+const CHECKS_H: f32 = 3.0 * 32.0 + 6.0;
 
 impl Ui {
     pub(super) fn dialog(&mut self, p: &mut Painter, m: &Model, g: &Geometry) {
@@ -17,7 +19,7 @@ impl Ui {
         p.fill_rect(rect(0.0, 0.0, g.w, g.h), Color::rgba(0.0, 0.0, 0.0, 0.32));
         self.push_hit(rect(0.0, 0.0, g.w, g.h), Hit::Block, CursorHint::Default);
         let width: f32 = match d {
-            Dialog::Create(_) => 600.0,
+            Dialog::Create(_) | Dialog::Convert(_) => 600.0,
             Dialog::Comment { .. } | Dialog::Favorites => 560.0,
             _ => 460.0,
         };
@@ -25,7 +27,7 @@ impl Ui {
         let iw = width - 2.0 * PAD;
         // content height
         let body_h = match d {
-            Dialog::Create(_) => 20.0 + 74.0 + GAP + 28.0 + GAP + 3.0 * (ROW + GAP) + if m.create_warning() { 24.0 } else { 0.0 } + ROW,
+            Dialog::Create(d) => 20.0 + 74.0 + GAP + CHECKS_H + if d.delete_after { 20.0 } else { 0.0 } + 3.0 * (ROW + GAP) + if m.create_warning() { 24.0 } else { 0.0 } + ROW,
             Dialog::Password(_) | Dialog::Find(_) => 22.0 + 6.0 + ROW,
             Dialog::Comment { .. } => 22.0 + 6.0 + 220.0 + 20.0,
             Dialog::Info(t) => self.text.height(t, BODY, iw),
@@ -34,6 +36,9 @@ impl Ui {
                 self.text.height(desc, BODY, iw) + GAP + 28.0 + 4.0 + 20.0
             }
             Dialog::Favorites => (m.favorites.len().clamp(1, 8) as f32) * 34.0,
+            Dialog::Rename { .. } => 22.0 + 28.0 + ROW + 4.0 + 18.0,
+            Dialog::SelectMask { .. } => 22.0 + 6.0 + ROW,
+            Dialog::Convert(_) => 20.0 + 74.0 + GAP + 3.0 * (ROW + GAP) + 20.0,
         };
         let height = PAD + 30.0 + body_h + 18.0 + 34.0 + PAD;
         let x = ((g.w - width) / 2.0).round();
@@ -62,7 +67,16 @@ impl Ui {
                 }
                 cy += 74.0 + GAP;
                 self.checkbox(p, ix, cy, 28.0, "每個檔案／資料夾分別建立壓縮檔（分批壓縮）", dlg.each, true, Msg::Dialog(DlgMsg::ToggleEach));
-                cy += 28.0 + GAP;
+                cy += 32.0;
+                self.checkbox(p, ix, cy, 28.0, "壓縮後測試壓縮檔", dlg.test_after, true, Msg::Dialog(DlgMsg::ToggleTestAfter));
+                cy += 32.0;
+                self.checkbox(p, ix, cy, 28.0, "壓縮後刪除原始檔案", dlg.delete_after, true, Msg::Dialog(DlgMsg::ToggleDeleteAfter));
+                cy += 32.0;
+                if dlg.delete_after {
+                    self.text.draw_line(p, "⚠ 原始檔案會被永久刪除（不經過資源回收筒）", ix + 28.0, cy - 4.0, 20.0, SMALL, col(c.warning));
+                    cy += 20.0;
+                }
+                cy += 6.0;
                 // format
                 label(self, p, cy, "格式：");
                 let fr = rect(ix + LABEL_W, cy, 220.0, ROW);
@@ -142,6 +156,58 @@ impl Ui {
                     cy += 34.0;
                 }
                 self.buttons(p, x + width - PAD, buttons_y, &[("關閉", true, true, DlgMsg::Ok)]);
+            }
+            Dialog::Rename { from, text, .. } => {
+                let orig = from.rsplit(['/', '\\']).next().unwrap_or(from);
+                let t = self.text.elide(&format!("原名稱：{orig}"), SMALL, iw);
+                self.text.draw_line(p, &t, ix, cy, 20.0, SMALL, col(c.muted_foreground));
+                cy += 22.0;
+                self.text.draw_line(p, "新名稱：", ix, cy, 22.0, BODY, col(c.foreground));
+                self.input(p, rect(ix, cy + 28.0, iw, ROW), Field::Rename, text, true, "");
+                self.text.draw_line(p, "只能變更名稱；不能包含 / 或 \\", ix, cy + 28.0 + ROW + 4.0, 18.0, SMALL, col(c.muted_foreground));
+                let ok = !text.text.trim().is_empty() && !m.busy();
+                self.buttons(p, x + width - PAD, buttons_y, &[("確定", ok, true, DlgMsg::Ok), ("取消", true, false, DlgMsg::Cancel)]);
+            }
+            Dialog::SelectMask { text, .. } => {
+                self.text.draw_line(p, "檔案遮罩（可使用 * 與 ?，多個以 ; 分隔）：", ix, cy, 22.0, BODY, col(c.foreground));
+                self.input(p, rect(ix, cy + 28.0, iw, ROW), Field::Mask, text, true, "例如 *.txt;*.jpg");
+                self.buttons(p, x + width - PAD, buttons_y, &[("確定", true, true, DlgMsg::Ok), ("取消", true, false, DlgMsg::Cancel)]);
+            }
+            Dialog::Convert(dlg) => {
+                let label = |s: &mut Self, p: &mut Painter, y: f32, t: &str| s.label(p, ix, y, ROW, t, col(c.foreground));
+                self.text.draw_line(p, "來源壓縮檔：", ix, cy, 20.0, SMALL, col(c.muted_foreground));
+                cy += 20.0;
+                let src = rect(ix, cy, iw, 74.0);
+                p.rounded_rect_bordered(src, 6.0, col(c.muted), 1.0, col(c.border));
+                let n = dlg.sources.len();
+                for (k, f) in dlg.sources.iter().take(3).enumerate() {
+                    let t = self.text.elide(&f.display().to_string(), SMALL, iw - 16.0);
+                    self.text.draw_line(p, &t, ix + 8.0, cy + 4.0 + k as f32 * 20.0, 20.0, SMALL, col(c.foreground));
+                }
+                if n > 3 {
+                    self.text.draw_line(p, &format!("…還有 {} 個", n - 3), ix + 8.0, cy + 4.0 + 60.0 - 8.0, 16.0, SMALL, col(c.muted_foreground));
+                }
+                cy += 74.0 + GAP;
+                label(self, p, cy, "格式：");
+                let fr = rect(ix + LABEL_W, cy, 220.0, ROW);
+                let open = matches!(m.popup, Some(crate::app::Popup::Formats { .. }));
+                self.field_box(p, fr, open);
+                self.text.draw_line(p, dlg.fmt().label(), ix + LABEL_W + 10.0, cy, ROW, BODY, col(c.foreground));
+                self.text.draw_line(p, "▾", ix + LABEL_W + 200.0, cy, ROW, BODY, col(c.muted_foreground));
+                let (fx_, fy, fw, fh) = rx(&fr);
+                self.click(fr, Msg::Dialog(DlgMsg::OpenFormats { x: fx_, y: fy + fh + 2.0, w: fw }));
+                cy += ROW + GAP;
+                label(self, p, cy, "壓縮等級：");
+                self.level_slider(p, m, rect(ix + LABEL_W, cy, iw - LABEL_W, ROW), dlg.fmt(), dlg.level);
+                cy += ROW + GAP;
+                label(self, p, cy, "密碼：");
+                let pw_ok = dlg.fmt().supports_password();
+                let ph = if pw_ok { "（選用，AES-256）" } else { "此格式不支援密碼" };
+                self.input(p, rect(ix + LABEL_W, cy, iw - LABEL_W, ROW), Field::ConvertPassword, &dlg.password, pw_ok, ph);
+                cy += ROW + GAP;
+                self.text.draw_line(p, "轉換後的壓縮檔會放在原壓縮檔旁，原始壓縮檔會保留。", ix, cy, 20.0, SMALL, col(c.muted_foreground));
+                let ok = !dlg.sources.is_empty() && !m.busy();
+                self.buttons(p, x + width - PAD, buttons_y, &[("轉換", ok, true, DlgMsg::Ok), ("取消", true, false, DlgMsg::Cancel)]);
             }
         }
     }
