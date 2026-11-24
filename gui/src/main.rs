@@ -8,7 +8,10 @@ mod collect;
 mod favorites;
 mod os;
 mod preview;
+mod report;
 mod scan;
+mod select;
+mod settings;
 mod shell;
 mod ui;
 mod view;
@@ -354,6 +357,8 @@ impl Application for App {
 /// --screenshot: lay out the window headlessly and rasterise it with the CPU renderer.
 fn screenshot(out: &std::path::Path, (w, h): (u32, u32), open: Option<PathBuf>, start: PathBuf) -> Result<(), String> {
     let mut app = App::new(start);
+    // deterministic: never read or write the user's settings
+    app.fx.persist = false;
     if let Some(p) = open {
         if p.is_dir() {
             upd::open_location(&mut app.m, &mut app.fx, p);
@@ -428,6 +433,9 @@ fn main() {
     let mut app = App::new(start_dir);
     {
         let (m, fx) = (&mut app.m, &mut app.fx);
+        // before the argument dispatch: shell invocations use the saved overwrite policy too
+        let settings = fx.settings_load();
+        app::winrar::apply_settings(m, settings);
         match action {
             Action::Open(p) => upd::open_archive(m, fx, p),
             Action::Compress(files) => upd::open_create(m, files, None),
